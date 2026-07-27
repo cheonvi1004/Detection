@@ -73,4 +73,19 @@ class Settings:
     # 침수 L1: 수위 급상승 감지 기준 (mm/min)
     rapid_rise_threshold_mm_per_min: float = _f("RAPID_RISE_THRESHOLD", 20.0)
 
+    # ==========================================
+    # 결로 감지 대상 센서 매핑 코드 설정
+    # ==========================================
+    # 외부 온도 센서
+    COND_EXT_TEMP_CAT = os.getenv("COND_EXT_TEMP_CAT", "SC000011")
+    COND_EXT_TEMP_TYPE = os.getenv("COND_EXT_TEMP_TYPE", "SE000019")
+    
+    # 외부 습도 센서
+    COND_EXT_HUMID_CAT = os.getenv("COND_EXT_HUMID_CAT", "SC000011")
+    COND_EXT_HUMID_TYPE = os.getenv("COND_EXT_HUMID_TYPE", "SE000020")
+    
+    # 벽체 온도 센서
+    COND_WALL_TEMP_CAT = os.getenv("COND_WALL_TEMP_CAT", "SC000006")
+    COND_WALL_TEMP_TYPE = os.getenv("COND_WALL_TEMP_TYPE", "SE000009")
+
 settings = Settings()

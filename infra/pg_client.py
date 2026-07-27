@@ -13,7 +13,7 @@ from typing import Optional
 
 import psycopg2, psycopg2.extras
 from config.settings import settings
-from domain.models import CondensationConfig, FloodConfig, ThresholdRow, SensorMeta
+from domain.models import CondensationConfig, FloodConfig, ThresholdRow, SensorMeta, CondensationGroup
 from domain.enums import AlertLevel, ThresholdOp, AggregationFn
 from utils.logger import get_logger
 
@@ -155,30 +155,119 @@ class PgRepo:
     # ── 결로 설정 조회 ────────────────────────────────────────────
     def get_condensation_config(self, resource_id: str) -> Optional[CondensationConfig]:
         with self._cur() as c:
+            # 1. 결로 공식 계수 조회
             c.execute("""
-                SELECT ct.resource_id, ct.level2_delta_t,
-                       fc.a, fc.b, fc.c
-                FROM anomaly_condensation_thresholds ct
-                JOIN anomaly_condensation_formula_coefficients fc
-                  ON fc.coeff_id = ct.coeff_id
-                WHERE ct.resource_id = %s
-                   OR ct.resource_id IS NULL
-                ORDER BY CASE WHEN ct.resource_id = %s THEN 0 ELSE 1 END
-                LIMIT 1
+                SELECT 
+                    COALESCE(t.resource_id, %s) AS resource_id,
+                    f.a AS coeff_a, f.b AS coeff_b, f.c AS coeff_c,level2_delta_t
+                FROM anomaly_condensation_thresholds t
+                JOIN anomaly_condensation_formula_coefficients f ON t.coeff_id = f.coeff_id
+                WHERE t.resource_id = %s OR t.resource_id IS NULL
+                ORDER BY t.resource_id NULLS LAST LIMIT 1
             """, (resource_id, resource_id))
+            
             row = c.fetchone()
+            if not row:
+                return None
 
-        if not row:
-            log.warning("결로 설정 없음: resource_id=%s", resource_id)
-            return None
+            config = CondensationConfig(
+                resource_id=row["resource_id"],
+                coeff_a=float(row["coeff_a"]), 
+                coeff_b=float(row["coeff_b"]), 
+                coeff_c=float(row["coeff_c"]),
+                level2_delta_t=int(row["level2_delta_t"])
+            )
 
-        return CondensationConfig(
-            resource_id    = resource_id,
-            coeff_a        = float(row["a"]),
-            coeff_b        = float(row["b"]),
-            coeff_c        = float(row["c"]),
-            level2_delta_t = float(row["level2_delta_t"]),
-        )
+            # 2. 동적 그룹핑(하위 구역 분할) 쿼리 실행
+            c.execute("""
+                WITH centers AS (
+                    SELECT 
+                        sensor_id, sensor_rl_id,
+                        CAST(TRIM(point_x) AS numeric) AS center_lon,
+                        CAST(TRIM(point_y) AS numeric) AS center_lat,
+                        'GROUP_' || LPAD(ROW_NUMBER() OVER(ORDER BY sensor_rl_id)::text, 2, '0') AS new_group_id
+                    FROM iot_sensor_ms
+                    WHERE TRIM(sensor_category) = %s 
+                      AND TRIM(sensor_element_type) = %s
+                      AND resource_id = %s
+                ),
+                distances AS (
+                    SELECT 
+                        s.sensor_id,
+                        s.sensor_rl_id,
+                        s.sensor_category,
+                        s.sensor_element_type,
+                        c.new_group_id,
+                        ROW_NUMBER() OVER(
+                            PARTITION BY s.sensor_rl_id, s.sensor_element_type 
+                            ORDER BY SQRT(POWER(CAST(TRIM(s.point_x) AS numeric) - c.center_lon, 2) + POWER(CAST(TRIM(s.point_y) AS numeric) - c.center_lat, 2)) ASC
+                        ) as rn
+                    FROM iot_sensor_ms s
+                    CROSS JOIN centers c
+                    WHERE TRIM(s.sensor_category) IN (%s, %s)
+                      AND s.point_x IS NOT NULL 
+                      AND s.point_y IS NOT NULL
+                      AND s.resource_id = %s
+                )
+                SELECT 
+                    new_group_id AS group_id,
+                    sensor_rl_id,
+                    TRIM(sensor_category) AS sensor_category,
+                    TRIM(sensor_element_type) AS sensor_element_type
+                FROM distances
+                WHERE rn = 1;
+            """, (
+                settings.COND_EXT_TEMP_CAT, settings.COND_EXT_TEMP_TYPE, resource_id,
+                settings.COND_EXT_TEMP_CAT, settings.COND_WALL_TEMP_CAT, resource_id
+            ))
+            
+            sensors = c.fetchall()
+            for s in sensors:
+                gid = s["group_id"]
+                cat = s["sensor_category"]
+                el_type = s["sensor_element_type"]
+                sid = s["sensor_rl_id"] 
+                
+                if not sid: continue
+                if gid not in config.groups:
+                    config.groups[gid] = CondensationGroup(group_id=gid)
+                
+                if cat == settings.COND_WALL_TEMP_CAT and el_type == settings.COND_WALL_TEMP_TYPE:
+                    config.groups[gid].wall_temp_sensor_ids.append(sid)
+                elif cat == settings.COND_EXT_TEMP_CAT and el_type == settings.COND_EXT_TEMP_TYPE:
+                    config.groups[gid].ext_temp_sensor_ids.append(sid)
+                elif cat == settings.COND_EXT_HUMID_CAT and el_type == settings.COND_EXT_HUMID_TYPE:
+                    config.groups[gid].ext_humid_sensor_ids.append(sid)
+
+            # 3. anomaly_thresholds 테이블에서 외부 온/습도 임계값 동적 조회
+            c.execute("""
+                SELECT sensor_element_type, alert_level, threshold_value
+                FROM anomaly_thresholds
+                WHERE resource_id = %s
+                  AND sensor_category IN (%s, %s)
+                  AND sensor_element_type IN (%s, %s)
+                  AND is_active = true
+            """, (
+                resource_id, 
+                settings.COND_EXT_TEMP_CAT, settings.COND_EXT_HUMID_CAT,
+                settings.COND_EXT_TEMP_TYPE, settings.COND_EXT_HUMID_TYPE
+            ))
+            
+            thresholds = c.fetchall()
+            for th in thresholds:
+                el_type = th["sensor_element_type"]
+                lvl_str = str(th["alert_level"]).upper()
+                val = float(th["threshold_value"])
+                
+                if el_type == settings.COND_EXT_TEMP_TYPE and lvl_str == 'LEVEL_1':
+                    config.ext_temp_l1_threshold = val
+                elif el_type == settings.COND_EXT_HUMID_TYPE:
+                    if lvl_str == 'LEVEL_1':
+                        config.ext_humid_l1_threshold = val
+                    elif lvl_str == 'LEVEL_2':
+                        config.ext_humid_l2_threshold = val
+
+            return config
 
     # ── 침수 파라미터 조회 ────────────────────────────────────────
     def get_flood_config(self, resource_id: str) -> Optional[FloodConfig]:

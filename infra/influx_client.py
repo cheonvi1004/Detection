@@ -135,70 +135,69 @@ from(bucket:"{self._bucket}")
 
     # ── 결로 (다중 센서) ──────────────────────────────────────────
     def get_condensation_data_multi(
-        self,
-        resource_id: str,
-        sensor_ids: list[str],
-    ) -> dict[str, dict[str, Optional[float]]]:
+        self, 
+        all_wall_ids: list[str], 
+        all_ext_temp_ids: list[str], 
+        all_ext_humid_ids: list[str]
+    ) -> dict[str, dict[str, float]]:
         """
-        여러 센서 ID를 한 번의 Flux 쿼리로 조회.
-
-        반환 형식:
-            {
-              "COND-A01": {"wall_temp": 24.1, "humidity": 72.3, "ext_temperature": 31.0},
-              "COND-A02": {"wall_temp": 23.8, "humidity": 75.1, "ext_temperature": 31.0},
-              ...
-            }
-
-        InfluxDB 태그 구조 가정:
-            - resource_id: 구역 ID  (예: "SEOUL-MOKDONG")
-            - sensor_id:   센서 ID  (예: "COND-A01")
-            - _field:      측정 항목 ("wall_temp" | "humidity" | "ext_temperature")
-
-        Flux에서 OR 조건으로 sensor_id 필터링 후
-        pivot으로 sensor_id별 필드를 열로 변환.
+        다수의 결로 센서(벽체 온도, 외부 온도, 외부 습도) 데이터를 InfluxDB에서 한 번에 조회합니다.
+        입력 ID 형식: "sensor_id-channel_id" (예: "20-122")
         """
-        if not sensor_ids:
-            return {}
+        
+        # 1. 모든 고유 센서 ID 취합 (InfluxDB에 한 번만 쿼리하기 위해 중복 제거)
+        all_ids = set(all_wall_ids + all_ext_temp_ids + all_ext_humid_ids)
+        if not all_ids:
+            return {"wall_temps": {}, "ext_temps": {}, "humidities": {}}
 
-        # Flux 필터 문자열 생성
-        # 예: r["sensor_id"]=="COND-A01" or r["sensor_id"]=="COND-A02"
-        sensor_filter = " or ".join(
-            f'r["sensor_id"]=="{sid}"' for sid in sensor_ids
-        )
+        # 2. InfluxDB Flux 쿼리 필터 조건 동적 생성
+        conditions = []
+        for combined_id in all_ids:
+            parts = combined_id.split('-')
+            if len(parts) == 2:
+                s_id, c_id = parts
+                # _measurement=sensor_pf 안에서 sensor_id와 channel_id 태그를 동시 만족하는 조건
+                conditions.append(f'(r["sensor_id"] == "{s_id}" and r["channel_id"] == "{c_id}")')
+        
+        if not conditions:
+            return {"wall_temps": {}, "ext_temps": {}, "humidities": {}}
 
-        flux = f"""
-from(bucket:"{self._bucket}")
-  |> range(start:-10m)
-  |> filter(fn:(r) => r["resource_id"]=="{resource_id}")
-  |> filter(fn:(r) => {sensor_filter})
-  |> filter(fn:(r) => r["_field"]=="wall_temp"
-         or r["_field"]=="ext_temperature"
-         or r["_field"]=="humidity")
-  |> last()"""
+        filter_str = " or ".join(conditions)
 
-        rows = self._query(flux)
+        # 3. Flux 쿼리 작성 (최근 15분 데이터 중 각 센서의 마지막 calc_value 값 조회)
+        query = f'''
+            from(bucket: "{self.bucket}")
+              |> range(start: -15m)
+              |> filter(fn: (r) => r["_measurement"] == "sensor_pf")
+              |> filter(fn: (r) => r["_field"] == "calc_value")
+              |> filter(fn: (r) => {filter_str})
+              |> last()
+        '''
 
-        # sensor_id별로 그룹핑
-        # rows 각 항목: {"sensor_id": "COND-A01", "_field": "wall_temp", "_value": 24.1, ...}
-        result: dict[str, dict[str, Optional[float]]] = {
-            sid: {"wall_temp": None, "humidity": None, "ext_temperature": None}
-            for sid in sensor_ids
+        # 4. InfluxDB 조회 및 결과 딕셔너리 매핑
+        results_map = {}
+        try:
+            tables = self.query_api.query(query, org=self.org)
+            for table in tables:
+                for record in table.records:
+                    # InfluxDB 결과에서 태그 및 필드 값 추출
+                    s_id = record.values.get("sensor_id")
+                    c_id = record.values.get("channel_id")
+                    val = record.get_value()
+                    
+                    if s_id and c_id and val is not None:
+                        # 원본 입력 형태("20-122")로 다시 조립하여 저장
+                        combined_key = f"{s_id}-{c_id}"
+                        results_map[combined_key] = float(val)
+        except Exception as e:
+            self.log.error(f"결로 센서 InfluxDB 다중 조회 실패: {e}")
+
+        # 5. 조회된 전체 결과를 용도별 리스트에 맞게 분배하여 반환
+        return {
+            "wall_temps": {k: results_map[k] for k in all_wall_ids if k in results_map},
+            "ext_temps": {k: results_map[k] for k in all_ext_temp_ids if k in results_map},
+            "humidities": {k: results_map[k] for k in all_ext_humid_ids if k in results_map}
         }
-
-        for row in rows:
-            sid   = row.get("sensor_id")
-            field = row.get("_field")
-            value = row.get("_value")
-            if sid in result and field in result[sid] and value is not None:
-                result[sid][field] = float(value)
-
-        # 조회 결과 없는 센서 로깅
-        missing = [sid for sid, d in result.items()
-                   if d["wall_temp"] is None and d["humidity"] is None]
-        if missing:
-            log.warning("[%s] 결로 센서 데이터 없음: %s", resource_id, missing)
-
-        return result
 
     # ── 구조 ─────────────────────────────────────────────────────
     def get_structure_data(self, resource_id: str) -> dict[str, Optional[float]]:

@@ -98,31 +98,34 @@ class ZoneStatus:
 
 
 # ── 결로 감지 설정 ────────────────────────────────────────────────
+
+@dataclass
+class CondensationGroup:
+    group_id: str
+    wall_temp_sensor_ids: list[str] = field(default_factory=list)
+    ext_temp_sensor_ids: list[str] = field(default_factory=list)
+    ext_humid_sensor_ids: list[str] = field(default_factory=list)
+
 @dataclass
 class CondensationConfig:
-    """
-    anomaly_condensation_thresholds + formula_coefficients 조인 결과.
-    level1_delta_t: DB에 없음 → level2_delta_t × 5/3 자동 산출.
-    """
-    resource_id:         str
+    resource_id:             str
     coeff_a:             float
     coeff_b:             float
     coeff_c:             float
-    level2_delta_t:      float    # 주의 ΔT 상한 Y (℃)
-    has_ventilation:     bool = True
-    season_winter_max_c: float = 12.0
-    season_spring_max_c: float = 23.0
-    target_temp_winter:  float = 20.0
-    target_temp_spring:  float = 22.5
-    target_temp_summer:  float = 25.0
-    target_rh_winter:    float = 60.0
-    target_rh_spring:    float = 65.0
-    target_rh_summer:    float = 70.0
+    level2_delta_t:      int
+    
+    # 하위 구역(그룹) 딕셔너리
+    groups: dict[str, CondensationGroup] = field(default_factory=dict)
+    
+    # 흐름도 평가용 외부 온습도 임계값 (DB 조회 실패 시 사용할 기본값)
+    ext_temp_l1_threshold:  float = 30.0  # 관심 단계: 외기온도 30℃ 이상
+    ext_humid_l1_threshold: float = 60.0  # 관심 단계: 상대습도 60% 이상
+    ext_humid_l2_threshold: float = 75.0  # 주의 단계: 상대습도 75% 이상
 
-    @property
-    def level1_delta_t(self) -> float:
-        """관심 ΔT 상한 X = Y × 5/3 (예: Y=3.0 → X=5.0)"""
-        return round(self.level2_delta_t * 5.0 / 3.0, 2)
+    #@property
+    #def level1_delta_t(self) -> float:
+    #    """관심 ΔT 상한 X = Y × 5/3 (예: Y=3.0 → X=5.0)"""
+    #    return round(self.level2_delta_t * 5.0 / 3.0, 2)
 
 
 # ── 침수 감지 설정 ────────────────────────────────────────────────
