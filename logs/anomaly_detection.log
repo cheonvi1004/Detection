@@ -1,0 +1,10 @@
+2026-07-24T04:41:59 [WARNING] engine.condensation | [TEST][S1] wall_temp 결측 — 스킵
+2026-07-24T04:41:59 [WARNING] engine.condensation | [TEST][S2] wall_temp 결측 — 스킵
+2026-07-24T04:41:59 [WARNING] engine.condensation | [TEST] 센서 결측: 유효 결로 센서 (wall_temp+humidity 쌍)
+2026-07-24T04:41:59 [WARNING] engine.condensation | [TEST][S1] wall_temp 결측 — 스킵
+2026-07-24T04:41:59 [WARNING] engine.condensation | [TEST] 센서 결측: wall_temp
+2026-07-24T04:42:26 [WARNING] engine.condensation | [TEST][S1] wall_temp 결측 — 스킵
+2026-07-24T04:42:26 [WARNING] engine.condensation | [TEST][S2] wall_temp 결측 — 스킵
+2026-07-24T04:42:26 [WARNING] engine.condensation | [TEST] 센서 결측: 유효 결로 센서 (wall_temp+humidity 쌍)
+2026-07-24T04:42:26 [WARNING] engine.condensation | [TEST][S1] wall_temp 결측 — 스킵
+2026-07-24T04:42:26 [WARNING] engine.condensation | [TEST] 센서 결측: wall_temp
