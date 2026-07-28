@@ -1,134 +1,83 @@
-"""
-alert/notifier.py
-──────────────────
-알림 발송 + cooldown 관리.
-
-설계서 4.2절 기준:
-  L1: 시스템 로그
-  L2: 로그 + SMS + Push
-  L3: L2 + 경보음
-  L4: L3 + 전관방송 + 재난 지원 요청
-"""
-from __future__ import annotations
-import json, time, urllib.request
-from datetime import datetime
-
+import time
+import requests
+from typing import Optional
 from config.settings import settings
+from domain.models import DomainResult
 from domain.enums import AlertLevel
-from domain.models import ZoneStatus
 from utils.logger import get_logger
 
 log = get_logger(__name__)
 
+class EventNotifier:
+    def __init__(self):
+        # 환경 변수(settings)에서 가져오되, 값이 없으면 요청하신 기본값 사용
+        self.api_url = getattr(settings, "EVENT_API_URL", "https://kong.spaasta.com/event-api")
+        self.auth_token = getattr(settings, "EVENT_API_AUTH", "Basic YWRtaW46Y29ucGl0YTc3ISE=")
 
-class Notifier:
-    def __init__(self) -> None:
-        # cooldown 추적: (resource_id, level) → 마지막 발송 unix ts
-        self._last: dict[tuple[str, int], float] = {}
-
-    def notify(self, status: ZoneStatus) -> list[str]:
-        lvl = status.zone_level
-        if lvl == AlertLevel.NONE:
-            return []
-        if self._in_cooldown(status.resource_id, lvl):
-            log.debug("[%s] cooldown 중 스킵 (%s)", status.resource_id, lvl.label)
-            return []
-        actions = self._dispatch(status.resource_id, lvl, status)
-        self._last[(status.resource_id, lvl.value)] = time.time()
-        return actions
-
-    def notify_recovery(self, resource_id: str, prev: AlertLevel) -> None:
-        msg = f"[{resource_id}] 이상 해제 — {prev.label} → 정상"
-        log.info("🟢 %s", msg)
-        self._sms(resource_id, msg)
-
-    # ── 단계별 발송 ───────────────────────────────────────────────
-    def _dispatch(self, resource_id: str, lvl: AlertLevel, status: ZoneStatus) -> list[str]:
-        msg  = self._build_msg(resource_id, lvl, status)
-        acts = []
-
-        if lvl >= AlertLevel.LEVEL_1:
-            log.info("🔵 [%s] %s", lvl.label, msg)
-            acts.append("LOG")
-
-        if lvl >= AlertLevel.LEVEL_2:
-            self._sms(resource_id, msg)
-            self._push(resource_id, msg, lvl)
-            acts += ["SMS", "PUSH"]
-
-        if lvl >= AlertLevel.LEVEL_3:
-            self._alarm(resource_id)
-            acts.append("ALARM")
-
-        if lvl >= AlertLevel.LEVEL_4:
-            self._broadcast(resource_id, msg)
-            self._disaster(resource_id)
-            acts += ["BROADCAST", "DISASTER_SUPPORT"]
-
-        return acts
-
-    @staticmethod
-    def _build_msg(resource_id: str, lvl: AlertLevel, status: ZoneStatus) -> str:
-        triggered = [
-            f"{d.value}({r.level.label})"
-            for d, r in status.domain_results.items()
-            if r.level > AlertLevel.NONE
-        ]
-        return (
-            f"[{lvl.label}] {resource_id} | "
-            f"{', '.join(triggered) or '이상감지'} | "
-            f"{datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')}"
-        )
-
-    def _sms(self, resource_id: str, msg: str) -> None:
-        if not settings.alert.sms_url:
-            log.debug("[%s] SMS 미설정 → 로그 대체: %s", resource_id, msg)
+    def send_alert(self, result: DomainResult):
+        """
+        이상 감지 결과를 이벤트 중계 API로 전송합니다.
+        위험 단계(AlertLevel)가 NONE(정상)이 아닐 때만 발송합니다.
+        """
+        if result.level == AlertLevel.NONE:
             return
+
+        # 현재 시간을 Unix Timestamp(초 단위 정수)로 변환
+        now_ts = int(time.time())
+        
+        # objectId 추출: 이벤트를 유발한 센서가 있다면 첫 번째 센서 ID 사용, 없으면 "-"
+        object_id = "-"
+        if result.triggered_sensors and len(result.triggered_sensors) > 0:
+            object_id = result.triggered_sensors[0]
+
+        # evtClass 추출: FIRE, FLOOD, STRUCTURE, CONDENSATION (Enum의 name 속성 활용)
+        evt_class = result.domain.name
+
+        # evtLevel 추출: 숫자형 변환 (예: LEVEL_4 -> 4)
+        evt_level = self._extract_level_number(result.level)
+
+        # 요청하신 JSON 규격에 맞춘 페이로드 구성
+        payload = {
+            "resourceId": result.resource_id,
+            "objectId": object_id,
+            "objectInstance": "-",
+            "startTime": now_ts,
+            "transTime": now_ts,
+            "evtClass": evt_class,
+            "evtAttribute": "ANOMALY",
+            "evtElementType": 4,
+            "evtInst": "-",
+            "evtLevel": evt_level,
+            "evtMessage": result.detail
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": self.auth_token
+        }
+
         try:
-            data = json.dumps({"resource_id": resource_id, "message": msg}).encode()
-            req  = urllib.request.Request(
-                settings.alert.sms_url, data=data,
-                headers={"Content-Type": "application/json",
-                         "X-API-Key": settings.alert.sms_api_key},
-                method="POST"
+            # API POST 요청 전송 (타임아웃 5초 설정)
+            response = requests.post(
+                self.api_url, 
+                json=payload, 
+                headers=headers, 
+                timeout=5
             )
-            with urllib.request.urlopen(req, timeout=5) as r:
-                log.info("[%s] SMS 완료: HTTP %s", resource_id, r.status)
-        except Exception as e:
-            log.error("[%s] SMS 실패: %s", resource_id, e)
+            response.raise_for_status()  # 200번대 응답이 아닐 경우 예외 발생
+            log.info(f"[이벤트 발송 성공] {evt_class} | {result.resource_id} | objectId: {object_id} | Level: {evt_level}")
+            
+        except requests.exceptions.RequestException as e:
+            log.error(f"[이벤트 발송 실패] {e} | Payload: {payload}")
 
-    def _push(self, resource_id: str, msg: str, lvl: AlertLevel) -> None:
-        if not settings.alert.push_url:
-            return
+    def _extract_level_number(self, level: AlertLevel) -> int:
+        """AlertLevel Enum에서 숫자(1~4)만 추출하여 반환합니다."""
         try:
-            data = json.dumps({
-                "to": f"/topics/{resource_id}",
-                "notification": {"title": f"[{lvl.label}] 공동구 이상", "body": msg},
-                "data": {"resource_id": resource_id, "level": lvl.value},
-            }).encode()
-            req = urllib.request.Request(
-                settings.alert.push_url, data=data,
-                headers={"Content-Type": "application/json",
-                         "Authorization": f"key={settings.alert.push_key}"},
-                method="POST"
-            )
-            with urllib.request.urlopen(req, timeout=5) as r:
-                log.info("[%s] Push 완료: HTTP %s", resource_id, r.status)
-        except Exception as e:
-            log.error("[%s] Push 실패: %s", resource_id, e)
-
-    def _alarm(self, resource_id: str) -> None:
-        log.warning("🚨 [%s] 경보음 트리거", resource_id)
-        # TODO: BAS REST API 호출
-
-    def _broadcast(self, resource_id: str, msg: str) -> None:
-        log.critical("📢 [%s] 전관방송: %s", resource_id, msg)
-        # TODO: 방송 시스템 연동
-
-    def _disaster(self, resource_id: str) -> None:
-        log.critical("🆘 [%s] 재난 소관부서 지원 요청", resource_id)
-        # TODO: 재난관리 시스템 연동
-
-    def _in_cooldown(self, resource_id: str, lvl: AlertLevel) -> bool:
-        last = self._last.get((resource_id, lvl.value))
-        return last is not None and (time.time() - last) < settings.alert.cooldown_sec
+            # 보통 Enum 값이 정수이거나 'LEVEL_1' 형태의 문자열일 수 있으므로 안전하게 처리
+            if isinstance(level.value, int):
+                return level.value
+            if isinstance(level.value, str) and "LEVEL_" in level.name:
+                return int(level.name.split("_")[1])
+            return 0 # 기본값
+        except Exception:
+            return 0

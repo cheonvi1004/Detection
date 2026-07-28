@@ -88,4 +88,10 @@ class Settings:
     COND_WALL_TEMP_CAT = os.getenv("COND_WALL_TEMP_CAT", "SC000006")
     COND_WALL_TEMP_TYPE = os.getenv("COND_WALL_TEMP_TYPE", "SE000009")
 
+    # ==========================================
+    # 이벤트 중계 API 설정
+    # ==========================================
+    EVENT_API_URL = os.getenv("EVENT_API_URL", "https://kong.spaasta.com/event-api")
+    EVENT_API_AUTH = os.getenv("EVENT_API_AUTH", "Basic YWRtaW46Y29ucGl0YTc3ISE=")
+
 settings = Settings()
