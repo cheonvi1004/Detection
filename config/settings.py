@@ -89,6 +89,18 @@ class Settings:
     COND_WALL_TEMP_TYPE = os.getenv("COND_WALL_TEMP_TYPE", "SE000009")
 
     # ==========================================
+    # 화재/가스 감지 대상 센서 매핑 코드 설정
+    # ==========================================
+    FIRE_GAS_CAT = os.getenv("FIRE_GAS_CAT", "SC000009")
+    
+    FIRE_GAS_O2_TYPE = os.getenv("FIRE_GAS_O2_TYPE", "SE000012")   # O2
+    FIRE_GAS_CO_TYPE = os.getenv("FIRE_GAS_CO_TYPE", "SE000013")   # CO
+    FIRE_GAS_CO2_TYPE = os.getenv("FIRE_GAS_CO2_TYPE", "SE000014") # CO2
+    FIRE_GAS_H2S_TYPE = os.getenv("FIRE_GAS_H2S_TYPE", "SE000015") # H2S
+    FIRE_GAS_TEMP_TYPE = os.getenv("FIRE_GAS_TEMP_TYPE", "SE000031") # 온도
+    
+
+    # ==========================================
     # 이벤트 중계 API 설정
     # ==========================================
     EVENT_API_URL = os.getenv("EVENT_API_URL", "https://kong.spaasta.com/event-api")

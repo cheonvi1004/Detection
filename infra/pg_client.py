@@ -13,7 +13,7 @@ from typing import Optional
 
 import psycopg2, psycopg2.extras
 from config.settings import settings
-from domain.models import CondensationConfig, FloodConfig, ThresholdRow, SensorMeta, CondensationGroup
+from domain.models import CondensationConfig, FloodConfig, ThresholdRow, SensorMeta, CondensationGroup, FireGasConfig
 from domain.enums import AlertLevel, ThresholdOp, AggregationFn
 from utils.logger import get_logger
 
@@ -302,3 +302,73 @@ class PgRepo:
             is_verified              = bool(row["is_verified"]),
             note                     = row.get("note"),
         )
+
+
+     # ── 화재_가스────────────────────────────────────────
+
+    def get_fire_gas_config(self, resource_id: str) -> Optional[FireGasConfig]:
+        with self._cur() as c:
+            config = FireGasConfig(resource_id=resource_id)
+            
+            # 1. 해당 구역의 복합가스센서(SC000009) 목록 조회 ("sensor_rl_id-채널" 혹은 활용 방식에 맞게)
+            # 여기서는 sensor_rl_id와 sensor_element_type을 결합하여 InfluxDB 조회용 키를 만든다고 가정
+            c.execute("""
+                SELECT ism.sensor_id,ism.sensor_rl_id, ism.sensor_name,ism.sensor_element_type
+                FROM iot_sensor_ms ism, iot_sensor_resource_rl isrr , iot_resource_ms irm 
+                WHERE ism.sensor_id  = isrr.sensor_id 
+                AND isrr.resource_id = irm.resource_id 
+                AND irm.resource_id =  %s
+                AND ism.sensor_category = %s
+                AND ism.sensor_rl_id IS NOT NULL
+            """, (resource_id, settings.FIRE_GAS_CAT))
+            
+            sensors = c.fetchall()
+            if not sensors:
+                return None
+                
+            # 센서 ID와 엘리먼트 타입을 묶어서 저장 (InfluxDB에서 조회 시 구분용)
+            # 예: "S000000001/1-201/SE000012" 형태로 저장하거나, 별도 매핑 규칙 사용
+            for s in sensors:
+                config.sensor_ids.append(f'{s["sensor_id"]}|{s["sensor_rl_id"]}|{s["sensor_element_type"]}|{s["sensor_name"]}')
+
+
+            # 2. anomaly_thresholds 테이블에서 화재/가스 동적 임계값 조회
+            c.execute("""
+                SELECT sensor_element_type, alert_level, threshold_value
+                FROM anomaly_thresholds
+                WHERE resource_id = %s
+                  AND sensor_category = %s
+                  AND is_active = true
+            """, (resource_id, settings.FIRE_GAS_CAT))
+            
+            thresholds = c.fetchall()
+            for th in thresholds:
+                el_type = th["sensor_element_type"]
+                lvl_str = str(th["alert_level"]).upper()
+                val = float(th["threshold_value"])
+                
+                # 온도 임계값 매핑 (온도는 분당 상승과 절대온도가 혼재하므로 정책에 따라 1, 2, 3 매핑)
+                if el_type == settings.FIRE_GAS_TEMP_TYPE:
+                    if lvl_str == 'LEVEL_1': config.temp_l1_rise_threshold = val
+                    elif lvl_str == 'LEVEL_2': config.temp_l2_threshold = val
+                    elif lvl_str == 'LEVEL_3': config.temp_l3_threshold = val
+                
+                # 가스별 임계값 매핑
+                elif el_type == settings.FIRE_GAS_O2_TYPE:
+                    if lvl_str == 'LEVEL_1': config.o2_l1_threshold = val
+                    elif lvl_str == 'LEVEL_2': config.o2_l2_threshold = val
+                    elif lvl_str == 'LEVEL_3': config.o2_l3_threshold = val
+                elif el_type == settings.FIRE_GAS_CO_TYPE:
+                    if lvl_str == 'LEVEL_1': config.co_l1_threshold = val
+                    elif lvl_str == 'LEVEL_2': config.co_l2_threshold = val
+                    elif lvl_str == 'LEVEL_3': config.co_l3_threshold = val
+                elif el_type == settings.FIRE_GAS_CO2_TYPE:
+                    if lvl_str == 'LEVEL_1': config.co2_l1_threshold = val
+                    elif lvl_str == 'LEVEL_2': config.co2_l2_threshold = val
+                    elif lvl_str == 'LEVEL_3': config.co2_l3_threshold = val
+                elif el_type == settings.FIRE_GAS_H2S_TYPE:
+                    if lvl_str == 'LEVEL_1': config.h2s_l1_threshold = val
+                    elif lvl_str == 'LEVEL_2': config.h2s_l2_threshold = val
+                    elif lvl_str == 'LEVEL_3': config.h2s_l3_threshold = val
+
+            return config

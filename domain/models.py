@@ -160,3 +160,35 @@ class FloodConfig:
         if self.pump_total_capacity_lpm is None:
             return None
         return self.pump_total_capacity_lpm * (1 + self.drain_disabled_margin_pct / 100.0)
+
+
+
+@dataclass
+class FireGasConfig:
+    resource_id: str
+    sensor_ids: list[str] = field(default_factory=list) # "sensor_id-channel_id" 리스트
+    
+    # 온도 임계값 (기본값 설정)
+    temp_l1_rise_threshold: float = 8.0  # 분당 상승(관심)
+    temp_l2_threshold: float = 60.0      # 절대온도(주의)
+    temp_l3_threshold: float = 75.0      # 절대온도(경계)
+
+    # 산소(O2) 임계값 (※ 산소는 이하일 때 위험)
+    o2_l1_threshold: float = 15.0
+    o2_l2_threshold: float = 10.0
+    o2_l3_threshold: float = 8.0
+
+    # 일산화탄소(CO) 임계값
+    co_l1_threshold: float = 1400.0
+    co_l2_threshold: float = 2000.0
+    co_l3_threshold: float = 2500.0
+
+    # 이산화탄소(CO2) 임계값
+    co2_l1_threshold: float = 5.0
+    co2_l2_threshold: float = 10.0
+    co2_l3_threshold: float = 30.0
+
+    # 황화수소(H2S) 임계값
+    h2s_l1_threshold: float = 100.0
+    h2s_l2_threshold: float = 200.0
+    h2s_l3_threshold: float = 500.0

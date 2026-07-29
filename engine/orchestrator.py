@@ -3,29 +3,29 @@ engine/orchestrator.py
 ───────────────────────
 4개 엔진 통합 오케스트레이터 + 메인 루프.
 
-설계서 4.1절 기준:
-- 화재/가스·침수·결로·구조 병렬 평가 (ThreadPoolExecutor)
-- 구역 대표 레벨 = 4개 중 최고값
-- Debounce: L1·L2=30초, L3=10초, L4=즉시
-- 레벨 상향 → 알림 발송 + 이벤트 기록
-- 레벨 하향 → 복구 알림
-- 도메인별 폴링 주기 독립 관리 + 이전 결과 캐싱
+변경 사항:
+- 각 도메인(센서)별 독립 평가 및 즉시 API 알림(POST) 전송 체계로 개편
+- 디바운스(Debounce) 및 상태 관리를 구역(Zone)과 도메인(Domain) 조합 단위로 독립 추적
+- 통합 평가(ZoneStatus) 제거 및 엔진별 빠른 반응성 확보
 """
 from __future__ import annotations
-import time, threading
+import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Optional
 
 from config.settings import settings
 from domain.enums import AlertLevel, DetectionDomain
-from domain.models import DomainResult, ZoneStatus
+from domain.models import DomainResult
 from engine.base import BaseDetectionEngine
 from engine.fire_gas import FireGasEngine
 from engine.flood import FloodEngine
 from engine.condensation import CondensationEngine
 from engine.structure import StructureEngine
-from alert.notifier import Notifier
+
+# 변경된 알림 모듈 임포트
+from alert.notifier import EventNotifier
 from infra.influx_client import InfluxRepo
 from infra.pg_client import PgRepo
 from utils.logger import get_logger
@@ -43,7 +43,9 @@ class Orchestrator:
     def __init__(self) -> None:
         self.influx   = InfluxRepo()
         self.pg       = PgRepo()
-        self.notifier = Notifier()
+        
+        # API POST 전송을 담당하는 Notifier로 교체
+        self.notifier = EventNotifier()
         self.pg.connect()
 
         self.engines: dict[DetectionDomain, BaseDetectionEngine] = {
@@ -53,125 +55,124 @@ class Orchestrator:
             DetectionDomain.STRUCTURE:    StructureEngine(self.influx, self.pg),
         }
 
-        # resource_id별 상태 추적
-        self._prev:     dict[str, AlertLevel]  = {}
+        # resource_id 및 도메인(Domain)별 상태 추적으로 변경
+        self._prev:     dict[str, dict[DetectionDomain, AlertLevel]] = {}
         self._debounce: dict[str, _Debounce]   = {}
-        # 도메인별 이전 평가 결과 캐시 (폴링 주기가 다른 도메인 결과 보존)
-        self._cache:    dict[str, dict[DetectionDomain, DomainResult]] = {}
         self._stop      = threading.Event()
 
-    # ── 단일 구역 전체 평가 ───────────────────────────────────────
-    def evaluate_zone(self, resource_id: str) -> ZoneStatus:
-        """4개 영역 ThreadPoolExecutor 병렬 평가."""
-        results: dict[DetectionDomain, DomainResult] = {}
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix=f"eval-{resource_id}") as exe:
-            futs = {exe.submit(eng._safe_evaluate, resource_id): dom
-                    for dom, eng in self.engines.items()}
-            for f in as_completed(futs):
-                dom = futs[f]
-                try:
-                    results[dom] = f.result()
-                except Exception as e:
-                    log.error("[%s] %s 예외: %s", resource_id, dom.value, e)
-                    results[dom] = DomainResult(
-                        resource_id=resource_id, domain=dom,
-                        level=AlertLevel.NONE, detail=str(e)
-                    )
-        zone_level = max((r.level for r in results.values()), default=AlertLevel.NONE)
-        return ZoneStatus(
-            resource_id=resource_id, zone_level=zone_level,
-            domain_results=results,
-            previous_level=self._prev.get(resource_id, AlertLevel.NONE),
-        )
+    # ── Debounce (도메인별 독립 적용) ────────────────────────────────
+    def _apply_debounce_domain(self, rid: str, dom: DetectionDomain, new: AlertLevel) -> AlertLevel:
+        if rid not in self._prev:
+            self._prev[rid] = {}
+            
+        prev = self._prev[rid].get(dom, AlertLevel.NONE)
+        cache_key = f"{rid}_{dom.name}"
 
-    # ── Debounce ─────────────────────────────────────────────────
-    def _apply_debounce(self, resource_id: str, new: AlertLevel) -> AlertLevel:
-        prev = self._prev.get(resource_id, AlertLevel.NONE)
+        # 이전보다 위험도가 같거나 낮으면 즉시 반영 (하향은 딜레이 없음)
         if new <= prev:
-            self._debounce.pop(resource_id, None)
+            self._debounce.pop(cache_key, None)
             return new
 
-        wait = settings.debounce.get(new.value)
+        # 설정된 디바운스 대기 시간이 0초면 즉시 반영
+        wait = settings.debounce.get(new.value, 0)
         if wait == 0:
-            self._debounce.pop(resource_id, None)
+            self._debounce.pop(cache_key, None)
             return new
 
         now   = time.time()
-        state = self._debounce.get(resource_id)
+        state = self._debounce.get(cache_key)
+        
+        # 새로운 이상 상태가 감지된 최초 시점 기록
         if state is None or state.candidate != new:
-            self._debounce[resource_id] = _Debounce(candidate=new, since=now)
-            log.debug("[%s] debounce 시작: %s→%s (%ds)",
-                      resource_id, prev.label, new.label, wait)
+            self._debounce[cache_key] = _Debounce(candidate=new, since=now)
+            log.debug("[%s][%s] debounce 시작: %s→%s (%ds)", rid, dom.name, prev.label, new.label, wait)
             return prev
 
+        # 설정된 대기 시간(wait)을 초과할 때까지 상태가 유지되었는지 검증
         elapsed = now - state.since
         if elapsed >= wait:
-            self._debounce.pop(resource_id, None)
-            log.info("[%s] debounce 완료(%.1fs): %s→%s",
-                     resource_id, elapsed, prev.label, new.label)
+            self._debounce.pop(cache_key, None)
+            log.info("[%s][%s] debounce 완료(%.1fs): %s→%s", rid, dom.name, elapsed, prev.label, new.label)
             return new
 
-        log.debug("[%s] debounce 대기 %.1f/%.0fs", resource_id, elapsed, wait)
+        log.debug("[%s][%s] debounce 대기 %.1f/%.0fs", rid, dom.name, elapsed, wait)
         return prev
 
-    # ── 상태 변화 처리 ────────────────────────────────────────────
-    def _handle(self, status: ZoneStatus, confirmed: AlertLevel) -> None:
-        rid  = status.resource_id
-        prev = self._prev.get(rid, AlertLevel.NONE)
-        self._prev[rid]   = confirmed
-        status.zone_level = confirmed
+    # ── 상태 변화 처리 (도메인별 즉각 발송) ───────────────────────────
+    def _handle_domain(self, result: DomainResult, confirmed: AlertLevel) -> None:
+        # 모델의 속성에 따라 유연하게 대응 (zone_id 또는 resource_id)
+        rid = getattr(result, "zone_id", getattr(result, "resource_id", "UNKNOWN"))
+        dom = result.domain
+        
+        if rid not in self._prev:
+            self._prev[rid] = {}
+            
+        prev = self._prev[rid].get(dom, AlertLevel.NONE)
+        self._prev[rid][dom] = confirmed
+        result.level = confirmed
 
+        # 위험 단계 상향 시 즉각 API 알림 전송
         if confirmed > prev:
             etype = "ESCALATED" if prev > AlertLevel.NONE else "TRIGGERED"
-            log.warning("⬆ [%s] %s → %s (%s)", rid, prev.label, confirmed.label, etype)
-            actions = self.notifier.notify(status)
-            self._record(status, etype, actions)
+            log.warning("⬆ [%s][%s] %s → %s (%s)", rid, dom.name, prev.label, confirmed.label, etype)
+            
+            # 이벤트 API POST 발송
+            self.notifier.send_alert(result)
+            self._record_domain(result, etype)
 
+        # 위험 단계 하향(복구) 시 내부 기록만 수행
         elif confirmed < prev:
-            log.info("⬇ [%s] %s → %s (RECOVERED)", rid, prev.label, confirmed.label)
-            self.notifier.notify_recovery(rid, prev)
-            self._record(status, "RECOVERED", [])
+            log.info("⬇ [%s][%s] %s → %s (RECOVERED)", rid, dom.name, prev.label, confirmed.label)
+            self._record_domain(result, "RECOVERED")
 
+        # 상태 유지
         else:
             if confirmed > AlertLevel.NONE:
-                log.debug("[%s] 유지: %s", rid, confirmed.label)
+                log.debug("[%s][%s] 이상 상태 유지: %s", rid, dom.name, confirmed.label)
 
-    def _record(self, status: ZoneStatus, etype: str, actions: list[str]) -> None:
-        top = max(status.domain_results.values(), key=lambda r: r.level)
+    def _record_domain(self, result: DomainResult, etype: str) -> None:
+        """InfluxDB에 개별 도메인 단위의 이벤트(히스토리)를 기록합니다."""
+        rid = getattr(result, "resource_id", getattr(result, "resource_id", "UNKNOWN"))
         self.influx.write_anomaly_event(
-            resource_id=status.resource_id,
-            domain=top.domain.value,
-            level=status.zone_level.label,
+            resource_id=rid,
+            domain=result.domain.value,
+            level=result.level.label,
             event_type=etype,
-            triggered_sensors=top.triggered_sensors,
-            sensor_values={**top.sensor_values, "actions": ",".join(actions)},
+            triggered_sensors=result.triggered_sensors,
+            sensor_values=result.sensor_values,
         )
 
     # ── 단회 실행 (테스트·CI용) ───────────────────────────────────
     def run_once(self) -> None:
         resources = self.pg.get_active_resources()
         log.info("단회 평가: %d개 구역", len(resources))
+        
         for r in resources:
             rid = r["resource_id"]
-            try:
-                status    = self.evaluate_zone(rid)
-                confirmed = self._apply_debounce(rid, status.zone_level)
-                self._handle(status, confirmed)
-            except Exception as e:
-                log.error("[%s] 평가 오류: %s", rid, e)
+            with ThreadPoolExecutor(max_workers=4, thread_name_prefix=f"eval-{rid}") as exe:
+                # 4대 엔진을 병렬로 평가하되, 결과는 수집되는 대로 독립적으로 즉시 발송
+                futs = {exe.submit(eng._safe_evaluate, rid): dom for dom, eng in self.engines.items()}
+                for f in as_completed(futs):
+                    dom = futs[f]
+                    try:
+                        result = f.result()
+                        confirmed = self._apply_debounce_domain(rid, dom, result.level)
+                        self._handle_domain(result, confirmed)
+                    except Exception as e:
+                        log.error("[%s] %s 평가 오류: %s", rid, dom.name, e)
 
-    # ── 메인 루프 ─────────────────────────────────────────────────
+    # ── 메인 루프 (도메인별 독립 폴링) ────────────────────
     def run(self) -> None:
         log.info("=" * 60)
-        log.info("지하공동구 이상감지 엔진 시작")
+        log.info("지하공동구 이상감지 엔진 시작 (도메인별 독립 평가 및 즉시 API 알림)")
         log.info("=" * 60)
 
         poll = settings.poll
         _schedule = [
             ("fire_gas",     poll.fire_gas_sec,     DetectionDomain.FIRE_GAS),
-            ("flood",        poll.flood_sec,         DetectionDomain.FLOOD),
-            ("condensation", poll.condensation_sec,  DetectionDomain.CONDENSATION),
-            ("structure",    poll.structure_sec,     DetectionDomain.STRUCTURE),
+            ("flood",        poll.flood_sec,        DetectionDomain.FLOOD),
+            ("condensation", poll.condensation_sec, DetectionDomain.CONDENSATION),
+            ("structure",    poll.structure_sec,    DetectionDomain.STRUCTURE),
         ]
         last_run: dict[str, float] = {k: 0.0 for k, _, _ in _schedule}
 
@@ -179,7 +180,7 @@ class Orchestrator:
             now       = time.time()
             resources = self.pg.get_active_resources()
 
-            # 이번 사이클에 실행할 도메인 목록
+            # 이번 사이클에 폴링 주기가 도래한 엔진(도메인) 목록 필터링
             due_domains = {
                 dom for key, interval, dom in _schedule
                 if now - last_run[key] >= interval
@@ -188,38 +189,21 @@ class Orchestrator:
             if due_domains:
                 for r in resources:
                     rid = r["resource_id"]
-                    cache = self._cache.setdefault(rid, {})
-                    updated = False
 
                     for dom in due_domains:
-                        result = self.engines[dom]._safe_evaluate(rid)
-                        cache[dom] = result
-                        updated    = True
+                        try:
+                            # 1. 도메인별 개별 평가 수행
+                            result = self.engines[dom]._safe_evaluate(rid)
 
-                    if not updated:
-                        continue
+                            # 2. 도메인별 디바운스 적용
+                            confirmed = self._apply_debounce_domain(rid, dom, result.level)
 
-                    # 캐시에 없는 도메인은 NONE으로 채움
-                    all_results = {
-                        dom: cache.get(
-                            dom,
-                            DomainResult(resource_id=rid, domain=dom, level=AlertLevel.NONE)
-                        )
-                        for dom in DetectionDomain
-                    }
-                    zone_level = max(
-                        (r.level for r in all_results.values()),
-                        default=AlertLevel.NONE
-                    )
-                    status = ZoneStatus(
-                        resource_id=rid, zone_level=zone_level,
-                        domain_results=all_results,
-                        previous_level=self._prev.get(rid, AlertLevel.NONE),
-                    )
-                    confirmed = self._apply_debounce(rid, zone_level)
-                    self._handle(status, confirmed)
+                            # 3. 도메인별 상태 처리 및 즉각 알림(API) 발송
+                            self._handle_domain(result, confirmed)
+                        except Exception as e:
+                            log.error("[%s] %s 평가 중 예기치 않은 오류 발생: %s", rid, dom.name, e)
 
-                # 실행한 도메인의 last_run 갱신
+                # 실행을 마친 도메인의 마지막 실행 시간 갱신
                 for key, interval, dom in _schedule:
                     if dom in due_domains:
                         last_run[key] = now

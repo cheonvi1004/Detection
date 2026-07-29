@@ -42,7 +42,20 @@ class InfluxRepo:
         except Exception as e:
             log.error("InfluxDB 예외: %s", e)
             return []
-
+        
+    def _parse_sensor_id(self, original_id: str) -> tuple[str, str]:
+        """
+        'S000000001/1-201/SE000012' 형태의 문자열에서 
+        가운데 '1-201'을 찾아 (sensor_id, channel_id) 튜플로 반환합니다.
+        """
+        # '/'가 포함되어 있다면 가운데 요소 추출, 아니면 원본 그대로 사용
+        target_str = original_id.split('|')[1] if '|' in original_id else original_id
+        
+        parts = target_str.split('-')
+        if len(parts) == 2:
+            return parts[0], parts[1]
+        return None, None
+    
     @staticmethod
     def _pick(rows: list[dict], field: str, agg: str = "last") -> Optional[float]:
         vals = [r["_value"] for r in rows
@@ -54,35 +67,91 @@ class InfluxRepo:
         if agg == "min":  return min(vals)
         return vals[-1]
 
-    # ── 화재/가스 ─────────────────────────────────────────────────
-    def get_fire_gas_data(self, resource_id: str) -> dict[str, Optional[float]]:
-        flux = f"""
-from(bucket:"{self._bucket}")
-  |> range(start:-1m)
-  |> filter(fn:(r) => r["resource_id"]=="{resource_id}")
-  |> filter(fn:(r) => r["_field"]=="temperature" or r["_field"]=="O2"
-         or r["_field"]=="CO" or r["_field"]=="CO2" or r["_field"]=="H2S")
-  |> last()"""
-        rows = self._query(flux)
-        rate = self._get_temp_rate(resource_id)
-        return {
-            "temperature": self._pick(rows, "temperature"),
-            "temp_rate":   rate,
-            "O2":          self._pick(rows, "O2"),
-            "CO":          self._pick(rows, "CO"),
-            "CO2":         self._pick(rows, "CO2"),
-            "H2S":         self._pick(rows, "H2S"),
-        }
+    # ==========================================
+    # 2. 화재/가스 엔진용 데이터 조회 (분당 상승률 계산 포함)
+    # ==========================================
+    def get_fire_gas_data(self, sensor_ids: list[str]) -> dict[str, dict[str, float]]:
+        if not sensor_ids:
+            return {}
 
-    def _get_temp_rate(self, resource_id: str) -> Optional[float]:
-        flux = f"""
-from(bucket:"{self._bucket}")
-  |> range(start:-2m)
-  |> filter(fn:(r) => r["resource_id"]=="{resource_id}"
-         and r["_field"]=="temperature")
-  |> derivative(unit:1m, nonNegative:false)
-  |> last()"""
-        return self._pick(self._query(flux), "temperature")
+        conditions = []
+        reverse_map = {}
+
+        for combined_id in sensor_ids:
+            s_id, c_id = self._parse_sensor_id(combined_id)
+            if s_id and c_id:
+                conditions.append(f'(r["sensor_id"] == "{s_id}" and r["channel_id"] == "{c_id}")')
+                reverse_map[f"{s_id}-{c_id}"] = combined_id
+
+        if not conditions:
+            return {}
+
+        filter_str = " or ".join(conditions)
+
+        # 분당 온도 상승률 계산을 위해 최근 3분 치의 시계열 데이터를 모두 가져옴
+        query = f'''
+            from(bucket: "{self.bucket}")
+              |> range(start: -3m)
+              |> filter(fn: (r) => r["_measurement"] == "sensor_pf")
+              |> filter(fn: (r) => r["_field"] == "calc_value")
+              |> filter(fn: (r) => {filter_str})
+        '''
+
+        raw_data = {}
+        try:
+            tables = self.query_api.query(query, org=self.org)
+            for table in tables:
+                for record in table.records:
+                    s_id = record.values.get("sensor_id")
+                    c_id = record.values.get("channel_id")
+                    val = record.get_value()
+                    time_val = record.get_time() # datetime 객체 반환
+                    
+                    if s_id and c_id and val is not None:
+                        key = f"{s_id}-{c_id}"
+                        original_key = reverse_map.get(key)
+                        
+                        if original_key:
+                            if original_key not in raw_data:
+                                raw_data[original_key] = []
+                            raw_data[original_key].append((time_val, float(val)))
+        except Exception as e:
+            log.error(f"화재/가스 센서 InfluxDB 조회 실패: {e}")
+
+        results = {}
+        for key, values in raw_data.items():
+            if not values:
+                continue
+                
+            # 시간순(오름차순) 정렬
+            values.sort(key=lambda x: x[0])
+            
+            current_time, current_val = values[-1]
+            rise_per_min = 0.0
+
+            # 데이터가 2개 이상일 때만 1분 전과 비교하여 상승률 계산
+            if len(values) > 1:
+                past_val = values[0][1]
+                past_time = values[0][0]
+                
+                # 역순으로 탐색하며 현재로부터 가장 '1분 전'에 가까운 데이터를 찾음
+                for t, v in reversed(values[:-1]):
+                    dt_seconds = (current_time - t).total_seconds()
+                    if dt_seconds >= 60:
+                        past_val = v
+                        past_time = t
+                        break
+                
+                time_diff_min = (current_time - past_time).total_seconds() / 60.0
+                if time_diff_min > 0:
+                    rise_per_min = (current_val - past_val) / time_diff_min
+
+            results[key] = {
+                "current": current_val,
+                "rise_per_min": round(rise_per_min, 2)
+            }
+
+        return results
 
     # ── 침수 ─────────────────────────────────────────────────────
     def get_flood_data(self, resource_id: str) -> dict[str, Optional[float]]:
