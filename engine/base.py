@@ -37,3 +37,23 @@ class BaseDetectionEngine(ABC):
     def _cap(self, level: AlertLevel) -> AlertLevel:
         """영역별 최대 단계 제한 (결로: LEVEL_3)."""
         return min(level, self.domain.max_level)
+
+    def _cap_level(self, level: AlertLevel) -> AlertLevel:
+        """위험도 상한선을 보장하는 유틸리티 메서드"""
+        if level > AlertLevel.LEVEL_4:
+            return AlertLevel.LEVEL_4
+        return level
+
+    def _missing_sensor(self, resource_id: str, reason: str) -> DomainResult:
+        """
+        센서 설정이 없거나 수집된 데이터가 없을 때 호출하는 공통 메서드.
+        정상(NONE) 상태로 반환하여 오탐을 방지합니다.
+        """
+        return DomainResult(
+            resource_id=resource_id,
+            domain=self.domain,
+            level=AlertLevel.NONE,
+            triggered_sensors=[],
+            sensor_values={},
+            detail=f"[{resource_id}] 평가 건너뜀 (사유: {reason})"
+        )

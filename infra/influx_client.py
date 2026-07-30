@@ -10,7 +10,7 @@ v2.1 변경:
 """
 from __future__ import annotations
 import json
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import Optional
 
 from influxdb_client import InfluxDBClient, Point
@@ -345,7 +345,7 @@ from(bucket:"{self._bucket}")
             .field("triggered_sensors", ",".join(triggered_sensors))
             .field("sensor_values",
                    json.dumps(sensor_values, ensure_ascii=False))
-            .time(datetime.utcnow())
+            .time(datetime.now(UTC))
         )
         try:
             wapi.write(bucket=self._bucket, org=settings.influx.org, record=pt)

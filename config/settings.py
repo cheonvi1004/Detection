@@ -15,18 +15,18 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class InfluxSettings:
-    url:    str = _s("INFLUX_URL",    "http://localhost:8086")
-    token:  str = _s("INFLUX_TOKEN",  "")
-    org:    str = _s("INFLUX_ORG",    "")
-    bucket: str = _s("INFLUX_BUCKET", "utility_tunnel")
+    url:    str = _s("INFLUX_URL",    "http://localhost:32088")
+    token:  str = _s("INFLUX_TOKEN",  "VBK4j2kqqmAopoAMlugwaeBWRsQSkJQ150tXOiBy1qVAET4Au12GwoOSjr7aImPv")
+    org:    str = _s("INFLUX_ORG",    "iot")
+    bucket: str = _s("INFLUX_BUCKET", "sensor_raw_bucket")
 
 @dataclass(frozen=True)
 class PgSettings:
-    host:     str = _s("PG_HOST",     "localhost")
+    host:     str = _s("PG_HOST",     "220.118.147.55")
     port:     int = _i("PG_PORT",     5432)
-    dbname:   str = _s("PG_DB",       "utility_tunnel")
-    user:     str = _s("PG_USER",     "detection_engine")
-    password: str = _s("PG_PASSWORD", "")
+    dbname:   str = _s("PG_DB",       "conpita")
+    user:     str = _s("PG_USER",     "conpita")
+    password: str = _s("PG_PASSWORD", "master")
     schema:   str = _s("PG_SCHEMA",   "sysmaster")   # 최종 DDL 스키마
 
     @property

@@ -5,12 +5,18 @@ from typing import Optional
 from domain.enums import AlertLevel, DetectionDomain
 from domain.models import CondensationConfig, DomainResult
 from engine.base import BaseDetectionEngine
+from utils.logger import get_logger
+
+log = get_logger(__name__)
 
 class CondensationEngine(BaseDetectionEngine):
     domain = DetectionDomain.CONDENSATION
 
     def evaluate(self, resource_id: str) -> DomainResult:
         cfg = self.pg.get_condensation_config(resource_id)
+
+        log.debug(f"[{resource_id}] get_condensation_config: {cfg}")
+
         if cfg is None or not cfg.groups:
             return self._missing_sensor(resource_id, "condensation_config_or_groups")
 
@@ -22,6 +28,9 @@ class CondensationEngine(BaseDetectionEngine):
             all_ext_humid_ids.extend(grp.ext_humid_sensor_ids)
 
         data = self.influx.get_condensation_data_multi(all_wall_ids, all_ext_temp_ids, all_ext_humid_ids)
+
+        log.debug(f"[{resource_id}] get_condensation_data_multi: {data}")
+
         wall_temps = data.get("wall_temps", {})
         ext_temps  = data.get("ext_temps", {})
         humidities = data.get("humidities", {})

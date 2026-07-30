@@ -317,6 +317,7 @@ class PgRepo:
                 SELECT normalized_fields
                 FROM device_current_status
                 WHERE sensor_network_uid = %s
+                AND cmd='0xA9'
             """, (sensor_rl_id,))
             
             row = c.fetchone()
