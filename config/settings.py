@@ -101,6 +101,21 @@ class Settings:
     
 
     # ==========================================
+    # 침수/배수 감지 대상 센서 매핑 코드 설정
+    # ==========================================
+    FLOOD_CAT = os.getenv("FLOOD_CAT", "SC000025")
+    FLOOD_PUMP_TYPE = os.getenv("FLOOD_PUMP_TYPE", "SE000017")
+
+    # ==========================================
+    # 구조물(균열/진동) 감지 대상 센서 매핑 코드 설정
+    # ==========================================
+    STRUCTURE_CRACK_CAT = os.getenv("STRUCTURE_CRACK_CAT", "SC000001")
+    STRUCTURE_VIB_CAT = os.getenv("STRUCTURE_VIB_CAT", "SC000004")
+    
+    STRUCTURE_CRACK_TYPE = os.getenv("STRUCTURE_CRACK_TYPE", "SE000001")
+    STRUCTURE_VIB_TYPE = os.getenv("STRUCTURE_VIB_TYPE", "SE000005")
+
+    # ==========================================
     # 이벤트 중계 API 설정
     # ==========================================
     EVENT_API_URL = os.getenv("EVENT_API_URL", "https://kong.spaasta.com/event-api")

@@ -45,7 +45,7 @@ class InfluxRepo:
         
     def _parse_sensor_id(self, original_id: str) -> tuple[str, str]:
         """
-        'S000000001/1-201/SE000012' 형태의 문자열에서 
+        '센서고유ID|센서연동ID|센서타입ID|센스명' 형태의 문자열에서 
         가운데 '1-201'을 찾아 (sensor_id, channel_id) 튜플로 반환합니다.
         """
         # '/'가 포함되어 있다면 가운데 요소 추출, 아니면 원본 그대로 사용
@@ -268,27 +268,66 @@ from(bucket:"{self._bucket}")
             "humidities": {k: results_map[k] for k in all_ext_humid_ids if k in results_map}
         }
 
-    # ── 구조 ─────────────────────────────────────────────────────
-    def get_structure_data(self, resource_id: str) -> dict[str, Optional[float]]:
-        flux_mean = f"""
-from(bucket:"{self._bucket}")
-  |> range(start:-5m)
-  |> filter(fn:(r) => r["resource_id"]=="{resource_id}")
-  |> filter(fn:(r) => r["_field"]=="crack_width" or r["_field"]=="strain")
-  |> mean()"""
-        flux_max = f"""
-from(bucket:"{self._bucket}")
-  |> range(start:-5m)
-  |> filter(fn:(r) => r["resource_id"]=="{resource_id}"
-         and r["_field"]=="vibration")
-  |> max()"""
-        rows_m = self._query(flux_mean)
-        rows_x = self._query(flux_max)
-        return {
-            "crack_width": self._pick(rows_m, "crack_width"),
-            "strain":      self._pick(rows_m, "strain"),
-            "vibration":   self._pick(rows_x, "vibration"),
-        }
+    # ==========================================
+    # 4. 구조물(균열/진동) 엔진용 데이터 조회
+    # ==========================================
+    def get_structure_data(self, sensor_ids: list[str]) -> dict[str, dict[str, float]]:
+        """
+        sensor_ids 예시: ["sensor_id|70-449|SE000001|sensor_name", "sensor_id|70-449|SE000001|sensor_name"]
+        이 ID를 파싱하여 InfluxDB를 조회한 후 {"70-449-SE000001": {"current": 0.15}} 형태로 반환합니다.
+        """
+        if not sensor_ids:
+            return {}
+
+        conditions = []
+        reverse_map = {}
+
+        for original_id in sensor_ids:
+            s_id, c_id = self._parse_sensor_id(original_id)
+
+            if s_id and c_id:
+                conditions.append(f'(r["sensor_id"] == "{s_id}" and r["channel_id"] == "{c_id}")')
+                reverse_map[f"{s_id}-{c_id}"] = original_id
+        
+
+        if not conditions:
+            return {}
+
+        # 여러 센서를 한 번에 조회하기 위한 or 조건 문자열 생성
+        filter_str = " or ".join(conditions)
+
+        # 가장 최근(last) 데이터만 조회
+        query = f'''
+            from(bucket: "{self.bucket}")
+              |> range(start: -15m)
+              |> filter(fn: (r) => r["_measurement"] == "sensor_pf")
+              |> filter(fn: (r) => r["_field"] == "calc_value")
+              |> filter(fn: (r) => {filter_str})
+              |> last()
+        '''
+
+        results = {}
+        try:
+            tables = self.query_api.query(query, org=self.org)
+            for table in tables:
+                for record in table.records:
+                    s_id = record.values.get("sensor_id")
+                    c_id = record.values.get("channel_id")
+                    val = record.get_value()
+                    
+                    if s_id and c_id and val is not None:
+                        # InfluxDB 결과("70-449")를 조립하여 원본 ID 찾기
+                        db_key = f"{s_id}-{c_id}"
+                        original_key = reverse_map.get(db_key)
+                        
+                        if original_key:
+                            results[original_key] = {
+                                "current": float(val)
+                            }
+        except Exception as e:
+            log.error(f"구조물 센서 InfluxDB 조회 실패: {e}")
+
+        return results
 
     # ── 이상 이벤트 기록 ─────────────────────────────────────────
     def write_anomaly_event(

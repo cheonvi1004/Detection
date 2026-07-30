@@ -131,35 +131,14 @@ class CondensationConfig:
 # ── 침수 감지 설정 ────────────────────────────────────────────────
 @dataclass
 class FloodConfig:
-    resource_id:               str
-    inlet_pipe_height_mm:      Optional[float]
-    level3_offset_mm:          float         = 150.0
-    pump_count:                Optional[int]  = None
-    pump_capacity_lpm:         Optional[float] = None
-    pump_total_capacity_lpm:   Optional[float] = None
-    drain_disabled_margin_pct: float          = 10.0
-    is_verified:               bool           = False
-    note:                      Optional[str]  = None
-
-    @property
-    def is_configurable(self) -> bool:
-        return self.inlet_pipe_height_mm is not None
-
-    @property
-    def level2_trigger_mm(self) -> Optional[float]:
-        return self.inlet_pipe_height_mm
-
-    @property
-    def level3_trigger_mm(self) -> Optional[float]:
-        if self.inlet_pipe_height_mm is None:
-            return None
-        return self.inlet_pipe_height_mm + self.level3_offset_mm
-
-    @property
-    def level4_inflow_threshold_lpm(self) -> Optional[float]:
-        if self.pump_total_capacity_lpm is None:
-            return None
-        return self.pump_total_capacity_lpm * (1 + self.drain_disabled_margin_pct / 100.0)
+    resource_id: str
+    sensor_rl_ids: list[str] = field(default_factory=list) # 센서 네트워크 UID 목록
+    
+    # DB 파라미터 값 (기본값 설정)
+    inlet_pipe_height_mm: float = 0.0   # 유입관 높이 (주의 기준)
+    level3_offset_mm: float = 150.0     # 유입관 + 15cm (경계 기준)
+    sump_capacity_liters: float = 0.0   # 집수정 용량
+    pump_capacity_lpm: float = 0.0      # 펌프 배수 용량
 
 
 
@@ -192,3 +171,19 @@ class FireGasConfig:
     h2s_l1_threshold: float = 100.0
     h2s_l2_threshold: float = 200.0
     h2s_l3_threshold: float = 500.0
+
+
+@dataclass
+class StructureConfig:
+    resource_id: str
+    sensor_ids: list[str] = field(default_factory=list) # "sensor_rl_id-element_type" 형태
+    
+    # 균열 센서 임계값 (기본값 설정)
+    crack_l1_threshold: float = 0.1
+    crack_l2_threshold: float = 0.3
+    crack_l3_threshold: float = 0.5
+
+    # 진동 센서 임계값 (기본값 설정)
+    vib_l1_threshold: float = 0.2
+    vib_l2_threshold: float = 0.5
+    vib_l3_threshold: float = 1.0

@@ -1,112 +1,120 @@
-"""
-engine/flood.py
-────────────────
-침수/수위 감지 엔진.
-
-최종 DDL 반영:
-- anomaly_flood_parameters에서 resource_id 기준 물리 파라미터 조회
-- drain_disabled_margin_pct: DB 저장값 그대로 사용
-  (L4 기준 = pump_total_capacity_lpm × (1 + margin/100))
-- inlet_pipe_height_mm NULL → 수위 기반 감지 불가 구역 처리
-"""
+"""engine/flood.py"""
 from __future__ import annotations
+from typing import Optional
+
 from domain.enums import AlertLevel, DetectionDomain
 from domain.models import DomainResult
 from engine.base import BaseDetectionEngine
-from config.settings import settings
+from utils.logger import get_logger
 
+log = get_logger(__name__)
 
 class FloodEngine(BaseDetectionEngine):
     domain = DetectionDomain.FLOOD
 
+    def __init__(self, influx, pg):
+        super().__init__(influx, pg)
+        # 배수불능상태(유입량 > 배수량) 판단을 위해 엔진 메모리에 이전 수위를 기록합니다.
+        self._prev_water_level: dict[str, float] = {}
+
     def evaluate(self, resource_id: str) -> DomainResult:
-        # ── DB에서 구역별 물리 파라미터 조회 ─────────────────────
+        # 1. DB에서 침수 설정 파라미터 조회
         cfg = self.pg.get_flood_config(resource_id)
-        if cfg is None:
-            return self._missing(resource_id, "anomaly_flood_parameters")
+        if not cfg or not cfg.sensor_rl_ids:
+            return self._missing_sensor(resource_id, "flood_config_empty")
 
-        if not cfg.is_configurable:
-            self.log.warning(
-                "[%s] 유입관 높이 미설정 — 수위 감지 불가 (note: %s)",
-                resource_id, cfg.note or "없음"
-            )
-            return DomainResult(
-                resource_id=resource_id, domain=self.domain,
-                level=AlertLevel.NONE,
-                detail=f"수위 감지 불가: inlet_pipe_height_mm 미설정",
-            )
+        max_level = AlertLevel.NONE
+        final_detail = "정상"
+        triggered_sensors = []
+        sensor_values = {}
 
-        if not cfg.is_verified:
-            self.log.warning("[%s] 미검증 파라미터 사용 중", resource_id)
+        # 2. 펌프 센서별 최신 상태 검사
+        for sensors in cfg.sensor_rl_ids:
 
-        # ── InfluxDB 센서값 조회 ──────────────────────────────────
-        data    = self.influx.get_flood_data(resource_id)
-        water   = data.get("water_level")
-        inflow  = data.get("inflow_rate")
-        drain   = data.get("drain_rate")
-        rise    = data.get("rise_rate")
+            parts = sensors.split('|')
 
-        sv: dict[str, float] = {}
-        if water  is not None: sv["water_level"]  = water
-        if inflow is not None: sv["inflow_rate"]  = inflow
-        if drain  is not None: sv["drain_rate"]   = drain
+            if len(parts) < 4:
+                continue
 
-        # ── L4: 배수불능 ─────────────────────────────────────────
-        # 조건: 유입량 > pump_total_capacity_lpm × (1 + margin/100)
-        if (inflow is not None
-                and cfg.level4_inflow_threshold_lpm is not None
-                and inflow > cfg.level4_inflow_threshold_lpm):
-            return DomainResult(
-                resource_id=resource_id, domain=self.domain,
-                level=AlertLevel.LEVEL_4,
-                triggered_sensors=["FLOW_INFLOW"], sensor_values=sv,
-                detail=(
-                    f"배수불능: 유입량 {inflow:.1f} L/min > "
-                    f"기준 {cfg.level4_inflow_threshold_lpm:.1f} L/min "
-                    f"(margin {cfg.drain_disabled_margin_pct:.0f}%)"
-                ),
-            )
+            s_id= parts[0]
+            rl_id = parts[1]
+            ca_id= parts[2]
+            s_name= parts[3]
+            
+            status_data = self.pg.get_flood_current_status(rl_id)
+            if not status_data:
+                continue
 
-        # ── L3: 수위 유입관+offset 초과 ──────────────────────────
-        if (water is not None
-                and cfg.level3_trigger_mm is not None
-                and water >= cfg.level3_trigger_mm):
-            return DomainResult(
-                resource_id=resource_id, domain=self.domain,
-                level=AlertLevel.LEVEL_3,
-                triggered_sensors=["WATER_LEVEL"], sensor_values=sv,
-                detail=(
-                    f"수위 경계: {water:.1f} mm ≥ "
-                    f"유입관+{cfg.level3_offset_mm:.0f}mm "
-                    f"({cfg.level3_trigger_mm:.1f} mm)"
-                ),
-            )
+            # JSON 페이로드에서 값 추출
+            water_level = float(status_data.get("waterLevelMm", 0.0))
+            pump1_state = status_data.get("pump1_state", "OFF")
+            pump2_state = status_data.get("pump2_state", "OFF")
+            hh_level = float(status_data.get("HH_Lv_mm", 9999.0))
+            sensor_state = status_data.get("sensor_state", "정상")
 
-        # ── L2: 수위 유입관 높이 도달 ────────────────────────────
-        if (water is not None
-                and cfg.level2_trigger_mm is not None
-                and water >= cfg.level2_trigger_mm):
-            return DomainResult(
-                resource_id=resource_id, domain=self.domain,
-                level=AlertLevel.LEVEL_2,
-                triggered_sensors=["WATER_LEVEL"], sensor_values=sv,
-                detail=(
-                    f"수위 주의: {water:.1f} mm ≥ "
-                    f"유입관 높이 {cfg.level2_trigger_mm:.1f} mm"
-                ),
-            )
+            # 제일 먼저 센서 상태부터 확인!
+            if not sensor_state =="정상":
+                continue
 
-        # ── L1: 수위 급상승 ──────────────────────────────────────
-        if (rise is not None
-                and rise >= settings.rapid_rise_threshold_mm_per_min):
-            return DomainResult(
-                resource_id=resource_id, domain=self.domain,
-                level=AlertLevel.LEVEL_1,
-                triggered_sensors=["WATER_LEVEL"], sensor_values=sv,
-                detail=f"수위 급상승: {rise:.1f} mm/min",
-            )
+            # 💡 [핵심] 유입량 > 배수량 판단 (펌프 가동 중 수위 상승 여부)
+            prev_level = self._prev_water_level.get(rl_id)
+            is_rising = prev_level is not None and water_level > prev_level
+            self._prev_water_level[rl_id] = water_level
+
+            is_pump_running = (pump1_state == "ON" or pump2_state == "ON")
+            
+            level = AlertLevel.NONE
+            detail = ""
+
+            # --- [흐름도 기반 판단 로직] ---
+            # (1) 심각 (Level 4): 배수불능상태 (펌프 가동 중 수위 상승) 또는 최고위험수위(HH) 도달
+            if (is_pump_running and is_rising) or water_level >= hh_level:
+                level = AlertLevel.LEVEL_4
+                detail = f"배수불능/위험수위 (수위: {water_level}mm, 펌프가동중 수위상승 또는 HH도달)"
+                
+            # (2) 경계 (Level 3): 유입관 + 15cm(150mm) 이상
+            elif water_level >= (cfg.inlet_pipe_height_mm + cfg.level3_offset_mm):
+                level = AlertLevel.LEVEL_3
+                detail = f"경계수위 도달 (수위: {water_level}mm, 유입관+15cm 이상)"
+                
+            # (3) 주의 (Level 2): 유입관 높이 이상
+            elif water_level >= cfg.inlet_pipe_height_mm:
+                level = AlertLevel.LEVEL_2
+                detail = f"주의수위 도달 (수위: {water_level}mm, 유입관 도달)"
+
+            # --- 결과 병합 (가장 위험한 센서를 0번 인덱스로) ---
+            if level > AlertLevel.NONE:
+                # 스냅샷 저장을 위해 펌프 상태값도 함께 기록합니다.
+                sensor_values[f"{s_id}_level_mm"] = water_level
+                sensor_values[f"{s_id}_pump1"] = pump1_state
+                sensor_values[f"{s_id}_pump2"] = pump2_state
+                
+                if level > max_level:
+                    max_level = level
+                    final_detail = detail
+                    if s_id in triggered_sensors:
+                        triggered_sensors.remove(s_id)
+                    triggered_sensors.insert(0, s_id)
+                else:
+                    if s_id not in triggered_sensors:
+                        triggered_sensors.append(s_id)
+
+        if not sensor_values:
+            return self._missing_sensor(resource_id, "no_active_flood_data")
+
+        # --- 조치사항 텍스트 매핑 ---
+        if max_level == AlertLevel.LEVEL_4:
+            final_detail += " (조치: 해당 구역 즉시 대피, 모든 배수설비 가동, 재난 대응 소관부서 지원요청)"
+        elif max_level == AlertLevel.LEVEL_3:
+            final_detail += " (조치: 구역 내 작업자 즉시 대피, 펌프제어반/배수설비 추가 가동)"
+        elif max_level == AlertLevel.LEVEL_2:
+            final_detail += " (조치: 주의 알림 발송, 누수/외부요인 침수 파악 및 펌프제어반 작동)"
 
         return DomainResult(
-            resource_id=resource_id, domain=self.domain,
-            level=AlertLevel.NONE, sensor_values=sv, detail="정상",
+            resource_id=resource_id,
+            domain=self.domain,
+            level=self._cap_level(max_level),
+            triggered_sensors=triggered_sensors,
+            sensor_values=sensor_values,
+            detail=f"[{resource_id}] {final_detail}"
         )

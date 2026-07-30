@@ -13,7 +13,7 @@ from typing import Optional
 
 import psycopg2, psycopg2.extras
 from config.settings import settings
-from domain.models import CondensationConfig, FloodConfig, ThresholdRow, SensorMeta, CondensationGroup, FireGasConfig
+from domain.models import CondensationConfig, FloodConfig, ThresholdRow, SensorMeta, CondensationGroup, FireGasConfig, StructureConfig
 from domain.enums import AlertLevel, ThresholdOp, AggregationFn
 from utils.logger import get_logger
 
@@ -270,38 +270,62 @@ class PgRepo:
             return config
 
     # ── 침수 파라미터 조회 ────────────────────────────────────────
+
     def get_flood_config(self, resource_id: str) -> Optional[FloodConfig]:
         with self._cur() as c:
+            cfg = FloodConfig(resource_id=resource_id)
+
+            # 1. 해당 구역의 배수설비(SC000025) - 펌프(SE000017) 센서 목록 조회
             c.execute("""
-                SELECT resource_id,
-                       inlet_pipe_height_mm, level3_offset_mm,
-                       pump_count, pump_capacity_lpm,
-                       pump_total_capacity_lpm,
-                       drain_disabled_margin_pct,
-                       is_verified, note
+                SELECT ism.sensor_id,ism.sensor_rl_id, ism.sensor_name ,ism.sensor_element_type
+                FROM iot_sensor_ms ism
+                JOIN iot_sensor_resource_rl isrr ON ism.sensor_id = isrr.sensor_id
+                WHERE isrr.resource_id = %s
+                  AND ism.sensor_category = %s
+                  AND ism.sensor_element_type = %s
+                  AND ism.sensor_rl_id IS NOT NULL
+            """, (resource_id, settings.FLOOD_CAT, settings.FLOOD_PUMP_TYPE))
+            
+            rows = c.fetchall()
+            if not rows:
+                return None
+
+            for s in rows:
+                cfg.sensor_rl_ids.append(f'{s["sensor_id"]}|{s["sensor_rl_id"]}|{s["sensor_element_type"]}|{s["sensor_name"]}')
+       
+
+            # 2. anomaly_flood_parameters 테이블에서 기준 파라미터 조회
+            c.execute("""
+                SELECT inlet_pipe_height_mm, level3_offset_mm
                 FROM anomaly_flood_parameters
                 WHERE resource_id = %s
             """, (resource_id,))
+            
+            param = c.fetchone()
+            if param:
+                if param.get("inlet_pipe_height_mm") is not None:
+                    cfg.inlet_pipe_height_mm = float(param["inlet_pipe_height_mm"])
+                if param.get("level3_offset_mm") is not None:
+                    cfg.level3_offset_mm = float(param["level3_offset_mm"])
+
+            return cfg
+
+    def get_flood_current_status(self, sensor_rl_id: str) -> dict:
+        """device_current_status 테이블에서 배수 펌프의 최신 JSON 데이터를 파싱하여 반환합니다."""
+        with self._cur() as c:
+            c.execute("""
+                SELECT normalized_fields
+                FROM device_current_status
+                WHERE sensor_network_uid = %s
+            """, (sensor_rl_id,))
+            
             row = c.fetchone()
-
-        if not row:
-            log.warning("침수 파라미터 없음: resource_id=%s", resource_id)
-            return None
-
-        def _f(v): return float(v) if v is not None else None
-        def _i(v): return int(v)   if v is not None else None
-
-        return FloodConfig(
-            resource_id              = resource_id,
-            inlet_pipe_height_mm     = _f(row["inlet_pipe_height_mm"]),
-            level3_offset_mm         = float(row["level3_offset_mm"]),
-            pump_count               = _i(row["pump_count"]),
-            pump_capacity_lpm        = _f(row["pump_capacity_lpm"]),
-            pump_total_capacity_lpm  = _f(row["pump_total_capacity_lpm"]),
-            drain_disabled_margin_pct= float(row["drain_disabled_margin_pct"]),
-            is_verified              = bool(row["is_verified"]),
-            note                     = row.get("note"),
-        )
+            if row and row.get("normalized_fields"):
+                import json
+                fields = row["normalized_fields"]
+                # DB 설정에 따라 dict로 바로 반환되거나 문자열일 수 있으므로 처리
+                return json.loads(fields) if isinstance(fields, str) else fields
+            return {}
 
 
      # ── 화재_가스────────────────────────────────────────
@@ -370,5 +394,57 @@ class PgRepo:
                     if lvl_str == 'LEVEL_1': config.h2s_l1_threshold = val
                     elif lvl_str == 'LEVEL_2': config.h2s_l2_threshold = val
                     elif lvl_str == 'LEVEL_3': config.h2s_l3_threshold = val
+
+            return config
+
+    # ── 구조물 ────────────────────────────────────────
+    def get_structure_config(self, resource_id: str) -> Optional[StructureConfig]:
+        with self._cur() as c:
+            config = StructureConfig(resource_id=resource_id)
+            
+            # 1. 해당 구역의 균열/진동 센서 목록 조회
+            c.execute("""
+                SELECT ism.sensor_id,ism.sensor_rl_id, ism.sensor_name ,ism.sensor_element_type
+                FROM iot_sensor_ms ism
+                JOIN iot_sensor_resource_rl isrr ON ism.sensor_id = isrr.sensor_id
+                WHERE isrr.resource_id = %s
+                  AND ism.sensor_category IN (%s, %s)
+                  AND ism.sensor_rl_id IS NOT NULL
+            """, (resource_id, settings.STRUCTURE_CRACK_CAT, settings.STRUCTURE_VIB_CAT))
+            
+            sensors = c.fetchall()
+            if not sensors:
+                return None
+                
+            for s in sensors:
+                # InfluxDB 조회용 키 생성 (예: "70-449-SE000001")
+                config.sensor_ids.append(f'{s["sensor_id"]}|{s["sensor_rl_id"]}|{s["sensor_element_type"]}|{s["sensor_name"]}')
+
+            # 2. anomaly_thresholds 테이블에서 구조물 동적 임계값 조회
+            c.execute("""
+                SELECT sensor_element_type, alert_level, threshold_value
+                FROM anomaly_thresholds
+                WHERE resource_id = %s
+                  AND sensor_category IN (%s, %s)
+                  AND is_active = true
+            """, (resource_id, settings.STRUCTURE_CRACK_CAT, settings.STRUCTURE_VIB_CAT))
+            
+            thresholds = c.fetchall()
+            for th in thresholds:
+                el_type = th["sensor_element_type"]
+                lvl_str = str(th["alert_level"]).upper()
+                val = float(th["threshold_value"])
+                
+                # 균열(Crack) 임계값 매핑
+                if el_type == settings.STRUCTURE_CRACK_TYPE:
+                    if lvl_str == 'LEVEL_1': config.crack_l1_threshold = val
+                    elif lvl_str == 'LEVEL_2': config.crack_l2_threshold = val
+                    elif lvl_str == 'LEVEL_3': config.crack_l3_threshold = val
+                
+                # 진동(Vibration) 임계값 매핑
+                elif el_type == settings.STRUCTURE_VIB_TYPE:
+                    if lvl_str == 'LEVEL_1': config.vib_l1_threshold = val
+                    elif lvl_str == 'LEVEL_2': config.vib_l2_threshold = val
+                    elif lvl_str == 'LEVEL_3': config.vib_l3_threshold = val
 
             return config
