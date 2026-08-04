@@ -136,6 +136,8 @@ class CondensationConfig:
 class FloodConfig:
     resource_id: str
     sensor_rl_ids: list[str] = field(default_factory=list) # 센서 네트워크 UID 목록
+
+    sensor_info_map: dict[str, dict] = field(default_factory=dict)
     
     # DB 파라미터 값 (기본값 설정)
     inlet_pipe_height_mm: float = 0.0   # 유입관 높이 (주의 기준)
@@ -149,6 +151,9 @@ class FloodConfig:
 class FireGasConfig:
     resource_id: str
     sensor_ids: list[str] = field(default_factory=list) # "sensor_id-channel_id" 리스트
+
+     # 💡 추가: 센서 메타데이터를 담을 맵 (srid -> 센서 정보)
+    sensor_info_map: dict[str, dict] = field(default_factory=dict)
     
     # 온도 임계값 (기본값 설정)
     temp_l1_rise_threshold: float = 8.0  # 분당 상승(관심)

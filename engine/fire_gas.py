@@ -16,16 +16,22 @@ class FireGasEngine(BaseDetectionEngine):
     def evaluate(self, resource_id: str) -> DomainResult:
         # 1. DB에서 해당 구역의 화재/가스 설정(임계값 포함) 조회
         cfg = self.pg.get_fire_gas_config(resource_id)
+
+        log.info(f"[{resource_id}] get_fire_gas_config: {cfg}")
+        
         if not cfg or not cfg.sensor_ids:
             return self._missing_sensor(resource_id, "fire_gas_config_empty")
 
         # 2. InfluxDB 데이터 조회 (센서 ID 목록 전달)
         # ※ influx.get_fire_gas_data_multi() 등 구현된 메서드로 변경 필요
         data = self.influx.get_fire_gas_data(cfg.sensor_ids)
-        
+
+        log.info(f"[{resource_id}] data: {data}")
+
         max_level = AlertLevel.NONE
         final_detail = "정상"
         triggered_sensors = []
+        sensor_results  = []
         sensor_values = {}
 
         # 복합 조건 검사를 위한 위험도 카운트
@@ -36,13 +42,12 @@ class FireGasEngine(BaseDetectionEngine):
         }
 
         # 3. 개별 센서 및 Element Type 순회하며 DB 임계값으로 평가
-        for sid_el, s_data in data.items():
-            # sid_el은 "센서ID-엘리먼트타입" 형태라고 가정
-            parts = sid_el.split("|")
-            sid = parts[0]
-            srlid=parts[1]
-            el_type = parts[2] if len(parts) > 2 else ""
-            sensor_name = parts[3] if len(parts) > 3 else ""
+        for s_rlid, s_data in data.items():
+          
+            info = cfg.sensor_info_map.get(s_rlid, {})
+            sid = info.get("sid", "UnknownID")
+            sensor_name = info.get("sname", "알 수 없는 센서")
+            el_type = info.get("el_type", "UnknownType")
             
             current_val = s_data.get("current", 0.0)
             
@@ -73,22 +78,25 @@ class FireGasEngine(BaseDetectionEngine):
                 
                 # 센서 측정값 스냅샷 저장
                 sensor_values[f"{sid}_{el_type}"] = current_val
+
+                final_detail = detail
+
+                # 3. 💡 개별 센서 이벤트 추출 (DomainResult의 sensor_results에 전달)
+                sensor_results.append({
+                    "sensor_id": sid,
+                    "element_type": el_type,
+                    "level": level,
+                    "value": "",
+                    "detail": final_detail
+                })
+
+                triggered_sensors.append(sid)
+                
                 
                 # 현재 센서가 지금까지 발견된 다른 센서들보다 위험도가 높다면?
                 if level > max_level:
                     max_level = level
-                    final_detail = detail
-                    
-                    # 이 센서 ID를 리스트의 맨 앞(0번 인덱스)에 끼워 넣습니다.
-                    # (notifier.py가 0번 인덱스를 objectId로 사용하기 때문)
-                    if sid in triggered_sensors:
-                        triggered_sensors.remove(sid)
-                    triggered_sensors.insert(0, sid)
-                    
-                # 그렇지 않다면 (위험도가 같거나 낮다면) 그냥 뒤에 추가합니다.
-                else:
-                    if sid not in triggered_sensors:
-                        triggered_sensors.append(sid)
+                
 
         # 4. [흐름도 복합 조건] 2가지 센서 이상 감지 시 격상(Escalation)
         # 경계(L3) 2개 이상 -> 심각(L4) 격상
@@ -102,13 +110,13 @@ class FireGasEngine(BaseDetectionEngine):
             final_detail = "[화재이상] 2가지 이상 센서 동시 '주의' -> [경계단계] 격상 (조치: 작업자 경계 알림, 구역 출입 통제 등)"
 
         # 단일 조건인 경우 후속 조치사항 메시지 결합
-        else:
-            if max_level == AlertLevel.LEVEL_3:
-                final_detail += " (조치: 작업자 경계 알림, 구역 출입 통제 등)"
-            elif max_level == AlertLevel.LEVEL_2:
-                final_detail += " (조치: 작업자 주의 알림, 배전반 과열 확인 등)"
-            elif max_level == AlertLevel.LEVEL_1:
-                final_detail += " (조치: 시설 점검, 발열 지점 확인 등)"
+        #else:
+        #    if max_level == AlertLevel.LEVEL_3:
+        #        final_detail += " (조치: 작업자 경계 알림, 구역 출입 통제 등)"
+        #    elif max_level == AlertLevel.LEVEL_2:
+        #        final_detail += " (조치: 작업자 주의 알림, 배전반 과열 확인 등)"
+        #    elif max_level == AlertLevel.LEVEL_1:
+        #        final_detail += " (조치: 시설 점검, 발열 지점 확인 등)"
 
         if not sensor_values:
             return self._missing_sensor(resource_id, "all_fire_gas_data_normal_or_empty")
@@ -119,7 +127,8 @@ class FireGasEngine(BaseDetectionEngine):
             level=self._cap_level(max_level),
             triggered_sensors=triggered_sensors,
             sensor_values=sensor_values,
-            detail=f"[{resource_id}] {final_detail}"
+            detail=final_detail,
+            sensor_results=sensor_results
         )
 
     def _evaluate_gas(self, el_type: str, val: float, cfg: FireGasConfig,sid: str, sensor_name: str) -> tuple[AlertLevel, str]:

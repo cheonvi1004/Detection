@@ -19,17 +19,18 @@ class StructureEngine(BaseDetectionEngine):
         if not cfg or not cfg.sensor_ids:
             return self._missing_sensor(resource_id, "structure_config_empty")
 
-        log.info(f"[{resource_id}] get_structure_config: {cfg}")
+        log.debug(f"[{resource_id}] get_structure_config: {cfg}")
 
         # 2. InfluxDB 데이터 조회 (센서 ID 목록 전달)
         # ※ 구조물 센서 데이터를 가져오는 influx 메서드 호출 (구현 필요 시 추가)
         data = self.influx.get_structure_data(cfg.sensor_ids)
 
-        log.info(f"[{resource_id}] get_structure_data: {data}")
+        log.debug(f"[{resource_id}] get_structure_data: {data}")
 
         max_level = AlertLevel.NONE
         final_detail = "정상"
         triggered_sensors = []
+        sensor_results= []
         sensor_values = {}
 
         # 복합 조건(에스컬레이션) 검사를 위한 위험도 카운트
@@ -76,46 +77,57 @@ class StructureEngine(BaseDetectionEngine):
                     detail = f"[구조물 이상] {sname}({sid}) 진동가속도 {current_val}cm/sec (설정치 {cfg.vib_l1_threshold}cm/sec 이상)"
 
 
-            log.info(f"[{resource_id}] level: {level}")
+            log.info(f"[{resource_id}|{sid}] level: {level}")
             # --- 💡 임계치를 초과한 센서 추출 및 정렬 처리 ---
             if level > AlertLevel.NONE:
                 level_counts[level] += 1
                 
-                # 가장 위험한 센서를 0번 인덱스(API 전달용)로 배치
-                #if level > max_level:
-                    
-                max_level = level
+              
+                if level > max_level:
+                    max_level = level
+
                 final_detail = detail
                 final_sensor_id = sid
                 final_el_type = el_type
                 
-                if sid in triggered_sensors:
-                    triggered_sensors.remove(sid)
-                triggered_sensors.insert(0, sid)
+                triggered_sensors.append(sid)
 
-                sensor_values = {
-                                "sensor_id": final_sensor_id,
-                                "element_type": final_el_type,
-                                "value": current_val
-                            }
+                sensor_values[f"{sid}_current"] = current_val
+
+                if max_level == AlertLevel.LEVEL_3:
+                    final_detail += " (조치: 유효 범위 내 작업 중지 알림, 보수·보강)"
+                elif max_level == AlertLevel.LEVEL_2:
+                    final_detail += " (조치: 공동구 구조적 안전을 위한 대책 수립 또는 외부 협조 요청)"
+                elif max_level == AlertLevel.LEVEL_1:
+                    final_detail += " (조치: 균열, 진동 요인 확인 및 비상 근무 체계 편성)"
+
+                # 3. 💡 개별 센서 이벤트 추출 (DomainResult의 sensor_results에 전달)
+                sensor_results.append({
+                    "sensor_id": sid,
+                    "element_type": el_type,
+                    "level": level,
+                    "value": current_val,
+                    "detail": final_detail
+                })
                 #else:
                 #    if sid not in triggered_sensors:
                 #       triggered_sensors.append(sid)
 
-                    
+        final_detail=""
+                 
         # 4. [흐름도 복합 조건] 2가지 센서 동시 감지 시 격상(Escalation)
         if level_counts[AlertLevel.LEVEL_3] >= 2:
             max_level = AlertLevel.LEVEL_4
             final_detail = "[구조물 이상] 2가지 센서 동시 '경계' -> [심각단계] 격상 (조치: 해당 구역 비상 발전/조명 가동, 보수·보강 및 피해복구)"
 
         # 단일 조건인 경우 흐름도에 명시된 후속 조치사항 메시지 결합
-        else:
-            if max_level == AlertLevel.LEVEL_3:
-                final_detail += " (조치: 유효 범위 내 작업 중지 알림, 보수·보강)"
-            elif max_level == AlertLevel.LEVEL_2:
-                final_detail += " (조치: 공동구 구조적 안전을 위한 대책 수립 또는 외부 협조 요청)"
-            elif max_level == AlertLevel.LEVEL_1:
-                final_detail += " (조치: 변형, 균열, 진동 요인 확인 및 비상 근무 체계 편성)"
+        #else:
+        #    if max_level == AlertLevel.LEVEL_3:
+        #        final_detail += " (조치: 유효 범위 내 작업 중지 알림, 보수·보강)"
+        #    elif max_level == AlertLevel.LEVEL_2:
+        #        final_detail += " (조치: 공동구 구조적 안전을 위한 대책 수립 또는 외부 협조 요청)"
+        #   elif max_level == AlertLevel.LEVEL_1:
+        #        final_detail += " (조치: 균열, 진동 요인 확인 및 비상 근무 체계 편성)"
 
         if not sensor_values:
             return self._missing_sensor(resource_id, "all_structure_data_normal_or_empty")
@@ -126,5 +138,6 @@ class StructureEngine(BaseDetectionEngine):
             level=self._cap_level(max_level),
             triggered_sensors=triggered_sensors,
             sensor_values=sensor_values,
-            detail=f"[{resource_id}] {final_detail}"
+            detail=final_detail,
+            sensor_results=sensor_results
         )

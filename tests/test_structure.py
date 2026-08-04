@@ -28,8 +28,8 @@ class TestStructureEngine(unittest.TestCase):
 
         # 두 센서 모두 LEVEL_3 임계값 이상 도달 (균열 0.6 >= 0.5, 진동 1.2 >= 1.0)
         self.influx_mock.get_structure_data.return_value = {
-            "70-449": {"current": 0.2},
-            "71-435": {"current": 1.2}
+            "70-449": {"current": 0.0},
+            "71-435": {"current": 0.2}
         }
 
         result = self.engine.evaluate("R0000001")

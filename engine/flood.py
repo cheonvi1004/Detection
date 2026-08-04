@@ -20,26 +20,25 @@ class FloodEngine(BaseDetectionEngine):
     def evaluate(self, resource_id: str) -> DomainResult:
         # 1. DB에서 침수 설정 파라미터 조회
         cfg = self.pg.get_flood_config(resource_id)
+
+        log.debug(f"[{resource_id}] get_flood_config: {cfg}")
+
         if not cfg or not cfg.sensor_rl_ids:
             return self._missing_sensor(resource_id, "flood_config_empty")
 
         max_level = AlertLevel.NONE
         final_detail = "정상"
         triggered_sensors = []
+        sensor_results= []
         sensor_values = {}
 
         # 2. 펌프 센서별 최신 상태 검사
-        for sensors in cfg.sensor_rl_ids:
+        for rl_id in cfg.sensor_rl_ids:
 
-            parts = sensors.split('|')
-
-            if len(parts) < 4:
-                continue
-
-            s_id= parts[0]
-            rl_id = parts[1]
-            ca_id= parts[2]
-            s_name= parts[3]
+            info = cfg.sensor_info_map.get(rl_id, {})
+            sid = info.get("sid", "UnknownID")
+            sname = info.get("sname", "알 수 없는 센서")
+            el_type = info.get("el_type", "UnknownType")
             
             status_data = self.pg.get_flood_current_status(rl_id)
             if not status_data:
@@ -70,45 +69,52 @@ class FloodEngine(BaseDetectionEngine):
             # (1) 심각 (Level 4): 배수불능상태 (펌프 가동 중 수위 상승) 또는 최고위험수위(HH) 도달
             if (is_pump_running and is_rising) or water_level >= hh_level:
                 level = AlertLevel.LEVEL_4
-                detail = f"배수불능/위험수위 (수위: {water_level}mm, 펌프가동중 수위상승 또는 HH도달)"
+                detail = f"[침수 이상] {sname}({sid}) 배수불능/위험수위 (수위: {water_level}mm, 펌프가동중 수위상승 또는 HH도달)"
                 
             # (2) 경계 (Level 3): 유입관 + 15cm(150mm) 이상
             elif water_level >= (cfg.inlet_pipe_height_mm + cfg.level3_offset_mm):
                 level = AlertLevel.LEVEL_3
-                detail = f"경계수위 도달 (수위: {water_level}mm, 유입관+15cm 이상)"
+                detail = f"[침수 이상] {sname}({sid}) 경계수위 도달 (수위: {water_level}mm, 유입관+15cm 이상)"
                 
             # (3) 주의 (Level 2): 유입관 높이 이상
             elif water_level >= cfg.inlet_pipe_height_mm:
                 level = AlertLevel.LEVEL_2
-                detail = f"주의수위 도달 (수위: {water_level}mm, 유입관 도달)"
+                detail = f"[침수 이상] {sname}({sid}) 주의수위 도달 (수위: {water_level}mm, 유입관 도달)"
 
             # --- 결과 병합 (가장 위험한 센서를 0번 인덱스로) ---
             if level > AlertLevel.NONE:
                 # 스냅샷 저장을 위해 펌프 상태값도 함께 기록합니다.
-                sensor_values[f"{s_id}_level_mm"] = water_level
-                sensor_values[f"{s_id}_pump1"] = pump1_state
-                sensor_values[f"{s_id}_pump2"] = pump2_state
+                sensor_values[f"{sid}_level_mm"] = water_level
+                sensor_values[f"{sid}_pump1"] = pump1_state
+                sensor_values[f"{sid}_pump2"] = pump2_state
+
+                final_detail = detail
+
+                triggered_sensors.append(sid)
+
+                # 3. 💡 개별 센서 이벤트 추출 (DomainResult의 sensor_results에 전달)
+                sensor_results.append({
+                    "sensor_id": sid,
+                    "element_type": el_type,
+                    "level": level,
+                    "value": "",
+                    "detail": final_detail
+                })
                 
                 if level > max_level:
                     max_level = level
-                    final_detail = detail
-                    if s_id in triggered_sensors:
-                        triggered_sensors.remove(s_id)
-                    triggered_sensors.insert(0, s_id)
-                else:
-                    if s_id not in triggered_sensors:
-                        triggered_sensors.append(s_id)
+                 
 
         if not sensor_values:
             return self._missing_sensor(resource_id, "no_active_flood_data")
 
         # --- 조치사항 텍스트 매핑 ---
-        if max_level == AlertLevel.LEVEL_4:
-            final_detail += " (조치: 해당 구역 즉시 대피, 모든 배수설비 가동, 재난 대응 소관부서 지원요청)"
-        elif max_level == AlertLevel.LEVEL_3:
-            final_detail += " (조치: 구역 내 작업자 즉시 대피, 펌프제어반/배수설비 추가 가동)"
-        elif max_level == AlertLevel.LEVEL_2:
-            final_detail += " (조치: 주의 알림 발송, 누수/외부요인 침수 파악 및 펌프제어반 작동)"
+        #if max_level == AlertLevel.LEVEL_4:
+        #     final_detail += " (조치: 해당 구역 즉시 대피, 모든 배수설비 가동, 재난 대응 소관부서 지원요청)"
+        #elif max_level == AlertLevel.LEVEL_3:
+        #    final_detail += " (조치: 구역 내 작업자 즉시 대피, 펌프제어반/배수설비 추가 가동)"
+        #elif max_level == AlertLevel.LEVEL_2:
+        #    final_detail += " (조치: 주의 알림 발송, 누수/외부요인 침수 파악 및 펌프제어반 작동)"
 
         return DomainResult(
             resource_id=resource_id,
@@ -116,5 +122,6 @@ class FloodEngine(BaseDetectionEngine):
             level=self._cap_level(max_level),
             triggered_sensors=triggered_sensors,
             sensor_values=sensor_values,
-            detail=f"[{resource_id}] {final_detail}"
+            detail=final_detail,
+            sensor_results=sensor_results
         )

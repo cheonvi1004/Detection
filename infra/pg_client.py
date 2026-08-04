@@ -306,8 +306,18 @@ class PgRepo:
                 return None
 
             for s in rows:
-                cfg.sensor_rl_ids.append(f'{s["sensor_id"]}|{s["sensor_rl_id"]}|{s["sensor_element_type"]}|{s["sensor_name"]}')
-       
+                srid = s["sensor_rl_id"]
+                if not srid: continue
+
+                cfg.sensor_rl_ids.append(srid)
+
+                 # 1. 💡 센서 상세 정보는 맵(Map)에 등록 (srid를 Key로 사용)
+                if srid not in cfg.sensor_info_map:
+                    cfg.sensor_info_map[srid] = {
+                        "sid": s["sensor_id"],
+                        "sname": s["sensor_name"],
+                        "el_type": s["sensor_element_type"]
+                    }
 
             # 2. anomaly_flood_parameters 테이블에서 기준 파라미터 조회
             c.execute("""
@@ -367,9 +377,19 @@ class PgRepo:
                 return None
                 
             # 센서 ID와 엘리먼트 타입을 묶어서 저장 (InfluxDB에서 조회 시 구분용)
-            # 예: "S000000001/1-201/SE000012" 형태로 저장하거나, 별도 매핑 규칙 사용
+            # 예: "1-201" 형태로 저장하거나, 별도 매핑 규칙 사용
             for s in sensors:
-                config.sensor_ids.append(f'{s["sensor_id"]}|{s["sensor_rl_id"]}|{s["sensor_element_type"]}|{s["sensor_name"]}')
+                srid = s["sensor_rl_id"]
+                if not srid: continue
+                config.sensor_ids.append(srid)
+
+                # 1. 💡 센서 상세 정보는 맵(Map)에 등록 (srid를 Key로 사용)
+                if srid not in config.sensor_info_map:
+                    config.sensor_info_map[srid] = {
+                        "sid": s["sensor_id"],
+                        "sname": s["sensor_name"],
+                        "el_type": s["sensor_element_type"]
+                    }
 
 
             # 2. anomaly_thresholds 테이블에서 화재/가스 동적 임계값 조회
@@ -435,7 +455,7 @@ class PgRepo:
             for s in sensors:
                 # InfluxDB 조회용 키 생성 (예: "70-449-SE000001")
                 srid=s["sensor_rl_id"]
-                config.sensor_rlids.append({srid})
+                config.sensor_ids.append(srid)
 
                 # 1. 💡 센서 상세 정보는 맵(Map)에 등록 (srid를 Key로 사용)
                 if srid not in config.sensor_info_map:

@@ -39,6 +39,7 @@ class CondensationEngine(BaseDetectionEngine):
         final_detail = "정상"
         final_sv = {}
         final_triggered = []
+        sensor_results = []
 
         # 2. 하위 구역(zone_01, zone_02 ...)별 평가
         for gid, grp in cfg.groups.items():
@@ -59,13 +60,17 @@ class CondensationEngine(BaseDetectionEngine):
 
                         # 조합별 흐름도 평가 적용
                         grp_level, sensor_id,grp_detail = self._evaluate_flowchart2(ext_t, rh, delta_t, gid,ext_t_id,humid_id,wall_id, cfg)
-                        
-                        # 가장 위험한 조합 발견 시 최종 결과에 덮어쓰기
-                        if grp_level > max_level:
-                            max_level = grp_level
+
+
+                        if grp_level > AlertLevel.NONE:
+
+                            # 가장 위험한 조합 발견 시 최종 결과에 덮어쓰기
+                            if grp_level > max_level:
+                                max_level = grp_level
+
                             final_detail = grp_detail
                             final_sensor_id = sensor_id
-                            final_triggered = [wall_id, ext_t_id, humid_id] if grp_level > AlertLevel.NONE else []
+                            final_triggered = [sensor_id] if grp_level > AlertLevel.NONE else []
                             final_sv = {
                                 "group_id": gid,
                                 "sensor_id": final_sensor_id,
@@ -76,6 +81,15 @@ class CondensationEngine(BaseDetectionEngine):
                                 "delta_T": round(delta_t, 2)
                             }
 
+                            # 3. 💡 개별 센서 이벤트 추출 (DomainResult의 sensor_results에 전달)
+                            sensor_results.append({
+                                "sensor_id": sensor_id,
+                                "element_type": "-",
+                                "level": grp_level,
+                                "value": final_sv,
+                                "detail": final_detail
+                            })
+
         if not final_sv:
             return self._missing_sensor(resource_id, "all_groups_data_empty")
 
@@ -85,7 +99,8 @@ class CondensationEngine(BaseDetectionEngine):
             level=self._cap_level(max_level),
             triggered_sensors=final_triggered,
             sensor_values=final_sv, 
-            detail=final_detail
+            detail=final_detail,
+            sensor_results=sensor_results
         )
 
     @staticmethod

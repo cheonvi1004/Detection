@@ -84,11 +84,11 @@ class InfluxRepo:
         conditions = []
         reverse_map = {}
 
-        for combined_id in sensor_ids:
-            s_id, c_id = self._parse_sensor_id(combined_id)
+        for s_rlid in sensor_ids:
+            s_id, c_id = self._parse_sensor_channel_id(s_rlid)
             if s_id and c_id:
                 conditions.append(f'(r["sensor_id"] == "{s_id}" and r["channel_id"] == "{c_id}")')
-                reverse_map[f"{s_id}-{c_id}"] = combined_id
+                reverse_map[f"{s_id}-{c_id}"] = s_rlid
 
         if not conditions:
             return {}
