@@ -33,6 +33,11 @@ class TestCondensationEngine(unittest.TestCase):
             coeff_c=237.29,
             level2_delta_t=5.00,
             groups={"G01": group_1},
+            sensor_info_map={
+                "58-362": { "sid": "S01", "sname": "벽체온도1", "el_type": "SE01"},
+                "54-354": { "sid": "S02", "sname": "외부온도2", "el_type": "SE02"},
+                "54-358": { "sid": "S03", "sname": "외부습도1", "el_type": "SE03"}
+            },
             ext_humid_l1_threshold=70.0, 
             ext_humid_l2_threshold=80.0, 
             ext_temp_l1_threshold=30.0
@@ -73,6 +78,11 @@ class TestCondensationEngine(unittest.TestCase):
                     coeff_c=237.29,
                     level2_delta_t=5.00,  # 온도차 5.0도 미만일 때 주의 발령
                     groups={"G02": group_2},
+                    sensor_info_map={
+                            "58-362": { "sid": "S01", "sname": "벽체온도1", "el_type": "SE01"},
+                            "54-354": { "sid": "S02", "sname": "외부온도2", "el_type": "SE02"},
+                            "54-358": { "sid": "S03", "sname": "외부습도1", "el_type": "SE03"}
+                    },
                     ext_humid_l1_threshold=70.0, 
                     ext_humid_l2_threshold=80.0, 
                     ext_temp_l1_threshold=30.0

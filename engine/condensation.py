@@ -42,9 +42,9 @@ class CondensationEngine(BaseDetectionEngine):
 
         # 2. 하위 구역(zone_01, zone_02 ...)별 평가
         for gid, grp in cfg.groups.items():
-            grp_wall  = {sid: wall_temps[sid] for sid in grp.wall_temp_sensor_ids if sid in wall_temps}
-            grp_ext_t = {sid: ext_temps[sid] for sid in grp.ext_temp_sensor_ids if sid in ext_temps}
-            grp_humid = {sid: humidities[sid] for sid in grp.ext_humid_sensor_ids if sid in humidities}
+            grp_wall  = {srid: wall_temps[srid] for srid in grp.wall_temp_sensor_ids if srid in wall_temps}
+            grp_ext_t = {srid: ext_temps[srid] for srid in grp.ext_temp_sensor_ids if srid in ext_temps}
+            grp_humid = {srid: humidities[srid] for srid in grp.ext_humid_sensor_ids if srid in humidities}
 
             if not grp_wall or not grp_ext_t or not grp_humid:
                 continue
@@ -58,15 +58,17 @@ class CondensationEngine(BaseDetectionEngine):
                         delta_t = wall_t - t_dew
 
                         # 조합별 흐름도 평가 적용
-                        grp_level, grp_detail = self._evaluate_flowchart(ext_t, rh, delta_t, gid, cfg)
+                        grp_level, sensor_id,grp_detail = self._evaluate_flowchart2(ext_t, rh, delta_t, gid,ext_t_id,humid_id,wall_id, cfg)
                         
                         # 가장 위험한 조합 발견 시 최종 결과에 덮어쓰기
                         if grp_level > max_level:
                             max_level = grp_level
                             final_detail = grp_detail
+                            final_sensor_id = sensor_id
                             final_triggered = [wall_id, ext_t_id, humid_id] if grp_level > AlertLevel.NONE else []
                             final_sv = {
                                 "group_id": gid,
+                                "sensor_id": final_sensor_id,
                                 "ext_temperature": round(ext_t, 2),
                                 "ext_humidity": round(rh, 2),
                                 "wall_temp": round(wall_t, 2), 
@@ -112,6 +114,48 @@ class CondensationEngine(BaseDetectionEngine):
             return AlertLevel.LEVEL_1, msg
 
         return AlertLevel.NONE, f"[{gid}] 정상"
+
+    @staticmethod
+    def _evaluate_flowchart2(t_ext: float, rh: float, delta_t: float, gid: str,ext_t_id: str,humid_id: str,wall_id: str, cfg: CondensationConfig) -> tuple[AlertLevel, str,str]:
+        """흐름도(Flowchart) 기반 단계별 조치사항 평가"""
+
+        # [경계 단계]
+        if delta_t <= 0:
+            info = cfg.sensor_info_map.get(wall_id, {})
+            sid = info.get("sid", "UnknownID")
+            sname = info.get("sname", "알 수 없는 센서")
+            msg = f"[결로 이상] {sname}({sid}) 경계: ΔT({delta_t:.1f}℃) ≤ 0℃ (조치: 환기구 개방, 제습 설비 및 배기팬 가동)"
+            return AlertLevel.LEVEL_3, sid,msg
+
+        # [주의 단계]
+        if delta_t <= cfg.level2_delta_t:
+            info = cfg.sensor_info_map.get(wall_id, {})
+            sid = info.get("sid", "UnknownID")
+            sname = info.get("sname", "알 수 없는 센서")
+            msg = f"[결로 이상] {sname}({sid}) 주의: ΔT({delta_t:.1f}℃) ≤ {cfg.level2_delta_t:5}℃ (조치: 환기구 차단, 제습 설비 가동)"
+            return AlertLevel.LEVEL_2, sid,msg
+        if rh >= cfg.ext_humid_l2_threshold:
+            info = cfg.sensor_info_map.get(humid_id, {})
+            sid = info.get("sid", "UnknownID")
+            sname = info.get("sname", "알 수 없는 센서")
+            msg = f"[결로 이상] {sname}({sid}) 주의: 외부습도({rh:.1f}%) ≥ 설정치({cfg.ext_humid_l2_threshold:.1f}%) (조치: 환기구 차단, 제습 설비 가동)"
+            return AlertLevel.LEVEL_2, sid,msg
+
+        # [관심 단계]
+        if rh >= cfg.ext_humid_l1_threshold:
+            info = cfg.sensor_info_map.get(humid_id, {})
+            sid = info.get("sid", "UnknownID")
+            sname = info.get("sname", "알 수 없는 센서")
+            msg = f"[결로 이상] {sname}({sid}) 관심: 외부습도({rh:.1f}%) ≥ 설정치({cfg.ext_humid_l1_threshold:.1f}%) (조치: 노점/건구온도 주시, 시설물 점검)"
+            return AlertLevel.LEVEL_1, sid,msg
+        if t_ext >= cfg.ext_temp_l1_threshold:
+            info = cfg.sensor_info_map.get(ext_t_id, {})
+            sid = info.get("sid", "UnknownID")
+            sname = info.get("sname", "알 수 없는 센서")
+            msg = f"[결로 이상] {sname}({sid}) 관심: 외기온도({t_ext:.1f}℃) ≥ 설정치({cfg.ext_temp_l1_threshold:.1f}℃) (조치: 노점/건구온도 주시, 시설물 점검)"
+            return AlertLevel.LEVEL_1, sid,msg
+
+        return AlertLevel.NONE, "",f"[{gid}] 정상"
 
     @staticmethod
     def _dew_point(t_dry: float, rh: float, cfg: CondensationConfig) -> float:

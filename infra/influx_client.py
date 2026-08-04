@@ -56,6 +56,13 @@ class InfluxRepo:
             return parts[0], parts[1]
         return None, None
     
+    def _parse_sensor_channel_id(self, original_id: str) -> tuple[str, str]:
+           
+            parts = original_id.split('-')
+            if len(parts) == 2:
+                return parts[0], parts[1]
+            return None, None
+    
     @staticmethod
     def _pick(rows: list[dict], field: str, agg: str = "last") -> Optional[float]:
         vals = [r["_value"] for r in rows
@@ -273,8 +280,8 @@ from(bucket:"{self._bucket}")
     # ==========================================
     def get_structure_data(self, sensor_ids: list[str]) -> dict[str, dict[str, float]]:
         """
-        sensor_ids 예시: ["sensor_id|70-449|SE000001|sensor_name", "sensor_id|70-449|SE000001|sensor_name"]
-        이 ID를 파싱하여 InfluxDB를 조회한 후 {"70-449-SE000001": {"current": 0.15}} 형태로 반환합니다.
+        sensor_ids 예시: ["70-449", 70-449]
+       
         """
         if not sensor_ids:
             return {}
@@ -283,7 +290,7 @@ from(bucket:"{self._bucket}")
         reverse_map = {}
 
         for original_id in sensor_ids:
-            s_id, c_id = self._parse_sensor_id(original_id)
+            s_id, c_id = self._parse_sensor_channel_id(original_id)
 
             if s_id and c_id:
                 conditions.append(f'(r["sensor_id"] == "{s_id}" and r["channel_id"] == "{c_id}")')

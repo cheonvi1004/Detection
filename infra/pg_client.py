@@ -195,6 +195,7 @@ class PgRepo:
                     SELECT 
                         s.sensor_id,
                         s.sensor_rl_id,
+                        s.sensor_name,
                         s.sensor_category,
                         s.sensor_element_type,
                         c.new_group_id,
@@ -211,7 +212,9 @@ class PgRepo:
                 )
                 SELECT 
                     new_group_id AS group_id,
+                    sensor_id,
                     sensor_rl_id,
+                    sensor_name,
                     TRIM(sensor_category) AS sensor_category,
                     TRIM(sensor_element_type) AS sensor_element_type
                 FROM distances
@@ -226,18 +229,30 @@ class PgRepo:
                 gid = s["group_id"]
                 cat = s["sensor_category"]
                 el_type = s["sensor_element_type"]
-                sid = s["sensor_rl_id"] 
+                sid = s["sensor_id"] 
+                sname = s["sensor_name"]
+                srid = s["sensor_rl_id"] 
+
                 
                 if not sid: continue
+
+                # 1. 💡 센서 상세 정보는 맵(Map)에 등록 (srid를 Key로 사용)
+                if srid not in config.sensor_info_map:
+                    config.sensor_info_map[srid] = {
+                        "sid": sid,
+                        "sname": sname,
+                        "el_type": el_type
+                    }
+
                 if gid not in config.groups:
                     config.groups[gid] = CondensationGroup(group_id=gid)
                 
                 if cat == settings.COND_WALL_TEMP_CAT and el_type == settings.COND_WALL_TEMP_TYPE:
-                    config.groups[gid].wall_temp_sensor_ids.append(sid)
+                    config.groups[gid].wall_temp_sensor_ids.append(srid)
                 elif cat == settings.COND_EXT_TEMP_CAT and el_type == settings.COND_EXT_TEMP_TYPE:
-                    config.groups[gid].ext_temp_sensor_ids.append(sid)
+                    config.groups[gid].ext_temp_sensor_ids.append(srid)
                 elif cat == settings.COND_EXT_HUMID_CAT and el_type == settings.COND_EXT_HUMID_TYPE:
-                    config.groups[gid].ext_humid_sensor_ids.append(sid)
+                    config.groups[gid].ext_humid_sensor_ids.append(srid)
 
             # 3. anomaly_thresholds 테이블에서 외부 온/습도 임계값 동적 조회
             c.execute("""
@@ -419,7 +434,16 @@ class PgRepo:
                 
             for s in sensors:
                 # InfluxDB 조회용 키 생성 (예: "70-449-SE000001")
-                config.sensor_ids.append(f'{s["sensor_id"]}|{s["sensor_rl_id"]}|{s["sensor_element_type"]}|{s["sensor_name"]}')
+                srid=s["sensor_rl_id"]
+                config.sensor_rlids.append({srid})
+
+                # 1. 💡 센서 상세 정보는 맵(Map)에 등록 (srid를 Key로 사용)
+                if srid not in config.sensor_info_map:
+                    config.sensor_info_map[srid] = {
+                        "sid": s["sensor_id"],
+                        "sname": s["sensor_name"],
+                        "el_type": s["sensor_element_type"]
+                    }
 
             # 2. anomaly_thresholds 테이블에서 구조물 동적 임계값 조회
             c.execute("""

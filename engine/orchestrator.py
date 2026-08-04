@@ -101,7 +101,7 @@ class Orchestrator:
     # ── 상태 변화 처리 (도메인별 즉각 발송) ───────────────────────────
     def _handle_domain(self, result: DomainResult, confirmed: AlertLevel) -> None:
         # 모델의 속성에 따라 유연하게 대응 (zone_id 또는 resource_id)
-        rid = getattr(result, "zone_id", getattr(result, "resource_id", "UNKNOWN"))
+        rid = getattr(result, "resource_id", getattr(result, "resource_id", "UNKNOWN"))
         dom = result.domain
         
         if rid not in self._prev:

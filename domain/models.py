@@ -116,6 +116,9 @@ class CondensationConfig:
     
     # 하위 구역(그룹) 딕셔너리
     groups: dict[str, CondensationGroup] = field(default_factory=dict)
+
+    # 💡 추가: 센서 메타데이터를 담을 맵 (srid -> 센서 정보)
+    sensor_info_map: dict[str, dict] = field(default_factory=dict)
     
     # 흐름도 평가용 외부 온습도 임계값 (DB 조회 실패 시 사용할 기본값)
     ext_temp_l1_threshold:  float = 30.0  # 관심 단계: 외기온도 30℃ 이상
@@ -176,7 +179,9 @@ class FireGasConfig:
 @dataclass
 class StructureConfig:
     resource_id: str
-    sensor_ids: list[str] = field(default_factory=list) # "sensor_rl_id-element_type" 형태
+    sensor_ids: list[str] = field(default_factory=list) # "sensor_rl_id" 형태
+    # 💡 추가: 센서 메타데이터를 담을 맵 (srid -> 센서 정보)
+    sensor_info_map: dict[str, dict] = field(default_factory=dict)
     
     # 균열 센서 임계값 (기본값 설정)
     crack_l1_threshold: float = 0.1
