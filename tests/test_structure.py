@@ -27,9 +27,11 @@ class TestStructureEngine(unittest.TestCase):
         self.pg_mock.get_structure_config.return_value = cfg
 
         # 두 센서 모두 LEVEL_3 임계값 이상 도달 (균열 0.6 >= 0.5, 진동 1.2 >= 1.0)
+        # 두 센서 모두 LEVEL_3(경계) 임계값 이상 → LEVEL_4(심각) 격상
+        # 균열: 0.6mm → L3,  진동: 1.2cm/s → L3
         self.influx_mock.get_structure_data.return_value = {
-            "70-449": {"current": 0.0},
-            "71-435": {"current": 0.2}
+            "70-449": {"current": 0.6},
+            "71-435": {"current": 1.2}
         }
 
         result = self.engine.evaluate("R0000001")

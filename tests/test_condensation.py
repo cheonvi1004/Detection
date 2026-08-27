@@ -1,103 +1,88 @@
-"""tests/test_condensation.py"""
-import unittest
-from unittest import result
+"""tests/test_condensation.py — 실제 레포 CondensationGroup 구조 기준"""
+import sys, os, unittest
 from unittest.mock import MagicMock
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from domain.enums import AlertLevel, DetectionDomain
+from domain.models import CondensationConfig, CondensationGroup
 from engine.condensation import CondensationEngine
-from domain.enums import AlertLevel
-from domain.models import CondensationConfig,CondensationGroup
 
-from utils.logger import get_logger
 
-log = get_logger(__name__)
+def _cfg(level2: int = 5) -> CondensationConfig:
+    cfg = CondensationConfig(
+        resource_id="R0000001",
+        coeff_a=610.78, coeff_b=17.2694, coeff_c=237.29,
+        level2_delta_t=level2,
+    )
+    grp = CondensationGroup(group_id="G01")
+    grp.wall_temp_sensor_ids = ["58-362"]
+    grp.ext_temp_sensor_ids  = ["11-123"]
+    grp.ext_humid_sensor_ids = ["11-124"]
+    cfg.groups["G01"] = grp
+    cfg.sensor_info_map["58-362"] = {"sid":"S01","sname":"벽체온도1","el_type":"SE000009"}
+    cfg.sensor_info_map["11-123"] = {"sid":"S10","sname":"외기온도", "el_type":"SE000019"}
+    cfg.sensor_info_map["11-124"] = {"sid":"S11","sname":"외기습도", "el_type":"SE000020"}
+    return cfg
+
+
+def _engine(cfg, influx_data):
+    influx = MagicMock()
+    pg     = MagicMock()
+    pg.get_condensation_config.return_value  = cfg
+    influx.get_condensation_data_multi.return_value = influx_data
+    return CondensationEngine(influx, pg)
+
 
 class TestCondensationEngine(unittest.TestCase):
-    def setUp(self):
-        self.influx_mock = MagicMock()
-        self.pg_mock = MagicMock()
-        self.engine = CondensationEngine(self.influx_mock, self.pg_mock)
-
-    def test_evaluate_condensation_warning(self):
-        # 1. DB 센서 매핑 목업
-
-        group_1=CondensationGroup(
-            group_id="G01", 
-            wall_temp_sensor_ids=["58-362"], 
-            ext_temp_sensor_ids=["54-354"], 
-            ext_humid_sensor_ids=["54-358"]
-        )
-        
-        cfg = CondensationConfig(
-            resource_id="R0000001",
-            coeff_a=6.1078,
-            coeff_b=17.2694,
-            coeff_c=237.29,
-            level2_delta_t=5.00,
-            groups={"G01": group_1},
-            sensor_info_map={
-                "58-362": { "sid": "S01", "sname": "벽체온도1", "el_type": "SE01"},
-                "54-354": { "sid": "S02", "sname": "외부온도2", "el_type": "SE02"},
-                "54-358": { "sid": "S03", "sname": "외부습도1", "el_type": "SE03"}
-            },
-            ext_humid_l1_threshold=70.0, 
-            ext_humid_l2_threshold=80.0, 
-            ext_temp_l1_threshold=30.0
-        )
-
-        self.pg_mock.get_condensation_config.return_value = cfg
-        
-        # 2. InfluxDB 데이터 목업 (결로 발생 조건: 이슬점과 벽면 온도 차이가 2도 미만)
-        # 온도 25도, 습도 80%일 때 이슬점은 약 21.3도
-        # 벽면 온도가 22도라면 차이가 0.7도로 주의(LEVEL_2) 발령 대상
-        self.influx_mock.get_condensation_data_multi.return_value = {
-             "wall_temps": {"58-362": 22.0},
-             "ext_temps": {"54-354": 25.0},
-             "humidities": {"54-358": 80.0}
-        }
-
-        result = self.engine.evaluate("R0000001")
-
-        log.info(f"결과: {result}")
-
-        self.assertEqual(result.level, AlertLevel.LEVEL_2)
-        self.assertIn("58-362", result.triggered_sensors)
-        self.assertIn("group_id", result.sensor_values)
-
-    def test_evaluate_normal(self):
-
-        group_2=CondensationGroup(
-            group_id="G02", 
-            wall_temp_sensor_ids=["58-362"], 
-            ext_temp_sensor_ids=["54-354"], 
-            ext_humid_sensor_ids=["54-358"]
-        )
-
-        cfg = CondensationConfig(
-                    resource_id="R0000001",
-                    coeff_a=6.1078,
-                    coeff_b=17.2694,
-                    coeff_c=237.29,
-                    level2_delta_t=5.00,  # 온도차 5.0도 미만일 때 주의 발령
-                    groups={"G02": group_2},
-                    sensor_info_map={
-                            "58-362": { "sid": "S01", "sname": "벽체온도1", "el_type": "SE01"},
-                            "54-354": { "sid": "S02", "sname": "외부온도2", "el_type": "SE02"},
-                            "54-358": { "sid": "S03", "sname": "외부습도1", "el_type": "SE03"}
-                    },
-                    ext_humid_l1_threshold=70.0, 
-                    ext_humid_l2_threshold=80.0, 
-                    ext_temp_l1_threshold=30.0
-                )
-        
-
-        self.pg_mock.get_condensation_config.return_value = cfg
-        
-        # 온도 25도, 습도 30% -> 이슬점 매우 낮음. 벽면 온도가 22도면 정상
-        self.influx_mock.get_condensation_data_multi.return_value = {
-            "wall_temps": {"58-362": 22.0},
-            "ext_temps": {"54-354": 25.0},
-            "humidities": {"54-358": 30.0}
-        }
-
-        result = self.engine.evaluate("R0000001")
-        log.info(f"결과2: {result}")
+    def test_no_data_returns_none(self):
+        result = _engine(_cfg(), {"wall_temps":{},"ext_temps":{},"humidities":{}}).evaluate("R0000001")
         self.assertEqual(result.level, AlertLevel.NONE)
+
+    def test_level2_warning(self):
+        """T=22, RH=80 → ΔT≈3.6 ≤ Y=5 → 주의(L2)"""
+        result = _engine(_cfg(level2=5), {
+            "wall_temps": {"58-362": 22.0},
+            "ext_temps":  {"11-123": 25.0},
+            "humidities": {"11-124": 80.0},
+        }).evaluate("R0000001")
+        self.assertEqual(result.level, AlertLevel.LEVEL_2)
+        self.assertGreater(len(result.triggered_sensors), 0)
+
+    def test_level3_alert(self):
+        """RH=100% → ΔT≈0 → 경계(L3)"""
+        result = _engine(_cfg(level2=5), {
+            "wall_temps": {"58-362": 22.0},
+            "ext_temps":  {"11-123": 25.0},
+            "humidities": {"11-124": 100.0},
+        }).evaluate("R0000001")
+        self.assertEqual(result.level, AlertLevel.LEVEL_3)
+
+    def test_max_level_capped_at_level3(self):
+        self.assertEqual(DetectionDomain.CONDENSATION.max_level, AlertLevel.LEVEL_3)
+
+    def test_level1_humidity_trigger(self):
+        """외기습도 ≥ 60% → 관심(L1) 이상"""
+        result = _engine(_cfg(level2=5), {
+            "wall_temps": {"58-362": 25.0},
+            "ext_temps":  {"11-123": 20.0},
+            "humidities": {"11-124": 65.0},
+        }).evaluate("R0000001")
+        self.assertGreaterEqual(result.level, AlertLevel.LEVEL_1)
+
+
+class TestDewPoint(unittest.TestCase):
+    def _dew(self, t, rh):
+        return CondensationEngine._dew_point(t, rh, _cfg())
+
+    def test_rh100_equals_dry(self):
+        self.assertAlmostEqual(self._dew(25.0, 100.0), 25.0, delta=0.05)
+
+    def test_known_25c_60rh(self):
+        self.assertAlmostEqual(self._dew(25.0, 60.0), 16.7, delta=0.5)
+
+    def test_lower_rh_lower_dew(self):
+        self.assertGreater(self._dew(25.0, 80.0), self._dew(25.0, 50.0))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

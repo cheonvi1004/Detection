@@ -179,20 +179,26 @@ class PgRepo:
             )
 
             # 2. 동적 그룹핑(하위 구역 분할) 쿼리 실행
+            # iot_sensor_ms에는 resource_id 컬럼이 없으므로
+            # iot_sensor_resource_rl(JOIN 테이블)을 통해 구역 필터링
             c.execute("""
                 WITH centers AS (
-                    SELECT 
-                        sensor_id, sensor_rl_id,
-                        CAST(TRIM(point_x) AS numeric) AS center_lon,
-                        CAST(TRIM(point_y) AS numeric) AS center_lat,
-                        'GROUP_' || LPAD(ROW_NUMBER() OVER(ORDER BY sensor_rl_id)::text, 2, '0') AS new_group_id
-                    FROM iot_sensor_ms
-                    WHERE TRIM(sensor_category) = %s 
-                      AND TRIM(sensor_element_type) = %s
-                      AND resource_id = %s
+                    SELECT
+                        ism.sensor_id,
+                        ism.sensor_rl_id,
+                        CAST(TRIM(ism.point_x) AS numeric) AS center_lon,
+                        CAST(TRIM(ism.point_y) AS numeric) AS center_lat,
+                        'GROUP_' || LPAD(ROW_NUMBER() OVER(ORDER BY ism.sensor_rl_id)::text, 2, '0') AS new_group_id
+                    FROM iot_sensor_ms ism
+                    JOIN iot_sensor_resource_rl isrr ON ism.sensor_id = isrr.sensor_id
+                    WHERE TRIM(ism.sensor_category)     = %s
+                      AND TRIM(ism.sensor_element_type) = %s
+                      AND isrr.resource_id = %s
+                      AND ism.point_x IS NOT NULL
+                      AND ism.point_y IS NOT NULL
                 ),
                 distances AS (
-                    SELECT 
+                    SELECT
                         s.sensor_id,
                         s.sensor_rl_id,
                         s.sensor_name,
@@ -200,25 +206,29 @@ class PgRepo:
                         s.sensor_element_type,
                         c.new_group_id,
                         ROW_NUMBER() OVER(
-                            PARTITION BY s.sensor_rl_id, s.sensor_element_type 
-                            ORDER BY SQRT(POWER(CAST(TRIM(s.point_x) AS numeric) - c.center_lon, 2) + POWER(CAST(TRIM(s.point_y) AS numeric) - c.center_lat, 2)) ASC
-                        ) as rn
+                            PARTITION BY s.sensor_rl_id, s.sensor_element_type
+                            ORDER BY SQRT(
+                                POWER(CAST(TRIM(s.point_x) AS numeric) - c.center_lon, 2) +
+                                POWER(CAST(TRIM(s.point_y) AS numeric) - c.center_lat, 2)
+                            ) ASC
+                        ) AS rn
                     FROM iot_sensor_ms s
+                    JOIN iot_sensor_resource_rl isrr2 ON s.sensor_id = isrr2.sensor_id
                     CROSS JOIN centers c
                     WHERE TRIM(s.sensor_category) IN (%s, %s)
-                      AND s.point_x IS NOT NULL 
+                      AND s.point_x IS NOT NULL
                       AND s.point_y IS NOT NULL
-                      AND s.resource_id = %s
+                      AND isrr2.resource_id = %s
                 )
-                SELECT 
+                SELECT
                     new_group_id AS group_id,
                     sensor_id,
                     sensor_rl_id,
                     sensor_name,
-                    TRIM(sensor_category) AS sensor_category,
+                    TRIM(sensor_category)     AS sensor_category,
                     TRIM(sensor_element_type) AS sensor_element_type
                 FROM distances
-                WHERE rn = 1;
+                WHERE rn = 1
             """, (
                 settings.COND_EXT_TEMP_CAT, settings.COND_EXT_TEMP_TYPE, resource_id,
                 settings.COND_EXT_TEMP_CAT, settings.COND_WALL_TEMP_CAT, resource_id

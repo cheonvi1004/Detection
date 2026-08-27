@@ -119,7 +119,7 @@ class FloodEngine(BaseDetectionEngine):
         return DomainResult(
             resource_id=resource_id,
             domain=self.domain,
-            level=self._cap_level(max_level),
+            level=self._cap(max_level),
             triggered_sensors=triggered_sensors,
             sensor_values=sensor_values,
             detail=final_detail,

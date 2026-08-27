@@ -19,7 +19,7 @@ class TestModels(unittest.TestCase):
 
     def test_fire_gas_config_defaults(self):
         cfg = FireGasConfig(resource_id="R0000001")
-        self.assertEqual(cfg.zone_id, "R0000001")
+        self.assertEqual(cfg.resource_id, "R0000001")
         self.assertEqual(cfg.temp_l3_threshold, 75.0)  # 기본값 확인
         self.assertEqual(len(cfg.sensor_ids), 0)
 

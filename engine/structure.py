@@ -90,7 +90,8 @@ class StructureEngine(BaseDetectionEngine):
                 final_sensor_id = sid
                 final_el_type = el_type
                 
-                triggered_sensors.append(sid)
+                # triggered_sensors: InfluxDB 조회 키인 srid(original_id) 사용
+                triggered_sensors.append(original_id)
 
                 sensor_values[f"{sid}_current"] = current_val
 
@@ -113,9 +114,9 @@ class StructureEngine(BaseDetectionEngine):
                 #    if sid not in triggered_sensors:
                 #       triggered_sensors.append(sid)
 
-        final_detail=""
-                 
         # 4. [흐름도 복합 조건] 2가지 센서 동시 감지 시 격상(Escalation)
+        # ※ final_detail을 여기서 초기화하면 위에서 누적된 단일 센서 detail이 사라지므로
+        #    복합 조건 충족 시에만 덮어씀
         if level_counts[AlertLevel.LEVEL_3] >= 2:
             max_level = AlertLevel.LEVEL_4
             final_detail = "[구조물 이상] 2가지 센서 동시 '경계' -> [심각단계] 격상 (조치: 해당 구역 비상 발전/조명 가동, 보수·보강 및 피해복구)"
@@ -135,7 +136,7 @@ class StructureEngine(BaseDetectionEngine):
         return DomainResult(
             resource_id=resource_id,
             domain=self.domain,
-            level=self._cap_level(max_level),
+            level=self._cap(max_level),
             triggered_sensors=triggered_sensors,
             sensor_values=sensor_values,
             detail=final_detail,

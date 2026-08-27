@@ -97,7 +97,7 @@ class InfluxRepo:
 
         # 분당 온도 상승률 계산을 위해 최근 3분 치의 시계열 데이터를 모두 가져옴
         query = f'''
-            from(bucket: "{self.bucket}")
+            from(bucket: "{self._bucket}")
               |> range(start: -3m)
               |> filter(fn: (r) => r["_measurement"] == "sensor_pf")
               |> filter(fn: (r) => r["_field"] == "calc_value")
@@ -106,7 +106,7 @@ class InfluxRepo:
 
         raw_data = {}
         try:
-            tables = self.query_api.query(query, org=self.org)
+            tables = self._qapi.query(query, org=settings.influx.org)
             for table in tables:
                 for record in table.records:
                     s_id = record.values.get("sensor_id")
@@ -242,7 +242,7 @@ from(bucket:"{self._bucket}")
 
         # 3. Flux 쿼리 작성 (최근 15분 데이터 중 각 센서의 마지막 calc_value 값 조회)
         query = f'''
-            from(bucket: "{self.bucket}")
+            from(bucket: "{self._bucket}")
               |> range(start: -15m)
               |> filter(fn: (r) => r["_measurement"] == "sensor_pf")
               |> filter(fn: (r) => r["_field"] == "calc_value")
@@ -253,7 +253,7 @@ from(bucket:"{self._bucket}")
         # 4. InfluxDB 조회 및 결과 딕셔너리 매핑
         results_map = {}
         try:
-            tables = self.query_api.query(query, org=self.org)
+            tables = self._qapi.query(query, org=settings.influx.org)
             for table in tables:
                 for record in table.records:
                     # InfluxDB 결과에서 태그 및 필드 값 추출
@@ -266,7 +266,7 @@ from(bucket:"{self._bucket}")
                         combined_key = f"{s_id}-{c_id}"
                         results_map[combined_key] = float(val)
         except Exception as e:
-            self.log.error(f"결로 센서 InfluxDB 다중 조회 실패: {e}")
+            log.error(f"결로 센서 InfluxDB 다중 조회 실패: {e}")
 
         # 5. 조회된 전체 결과를 용도별 리스트에 맞게 분배하여 반환
         return {
@@ -305,7 +305,7 @@ from(bucket:"{self._bucket}")
 
         # 가장 최근(last) 데이터만 조회
         query = f'''
-            from(bucket: "{self.bucket}")
+            from(bucket: "{self._bucket}")
               |> range(start: -15m)
               |> filter(fn: (r) => r["_measurement"] == "sensor_pf")
               |> filter(fn: (r) => r["_field"] == "calc_value")
@@ -315,7 +315,7 @@ from(bucket:"{self._bucket}")
 
         results = {}
         try:
-            tables = self.query_api.query(query, org=self.org)
+            tables = self._qapi.query(query, org=settings.influx.org)
             for table in tables:
                 for record in table.records:
                     s_id = record.values.get("sensor_id")

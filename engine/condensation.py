@@ -96,7 +96,7 @@ class CondensationEngine(BaseDetectionEngine):
         return DomainResult(
             resource_id=resource_id, 
             domain=self.domain,
-            level=self._cap_level(max_level),
+            level=self._cap(max_level),
             triggered_sensors=final_triggered,
             sensor_values=final_sv, 
             detail=final_detail,
